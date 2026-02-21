@@ -1,9 +1,12 @@
-# Panacea: Surgical Mastery — AI-Guided Training Simulator
+# MedLab Coach AI - Skill Assessment for Medical Training Labs
 streamlit
+streamlit-autorefresh
 streamlit-webrtc
-opencv-python-headless
+opencv-python
 av
 google-genai
 pydantic
 python-dotenv
 mediapipe
+ultralytics
+plotly

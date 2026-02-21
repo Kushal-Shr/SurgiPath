@@ -1,0 +1,60 @@
+{
+  "name": "Trauma Room",
+  "expected_time_seconds": 300,
+  "preop_required": [
+    { "tool": "scalpel", "min_count": 1 },
+    { "tool": "forceps", "min_count": 1 },
+    { "tool": "needle_holder", "min_count": 1 },
+    { "tool": "scissors", "min_count": 1 },
+    { "tool": "clamp", "min_count": 1 },
+    { "tool": "suction", "min_count": 1 },
+    { "tool": "gauze", "min_count": 1 },
+    { "tool": "syringe", "min_count": 1 }
+  ],
+  "params": {
+    "conf_min": 0.45,
+    "stable_seconds": 2.0
+  },
+  "intraop_rules": [
+    {
+      "id": "r1",
+      "phase": "incision",
+      "if_present": ["scalpel"],
+      "if_missing": [],
+      "hold_seconds": 1.5,
+      "message": "Scalpel in view during incision phase."
+    },
+    {
+      "id": "r2",
+      "phase": "suturing",
+      "if_present": ["needle_holder", "forceps"],
+      "if_missing": [],
+      "hold_seconds": 2.0,
+      "message": "Needle holder and forceps expected during suturing."
+    },
+    {
+      "id": "r3",
+      "phase": "suturing",
+      "if_present": [],
+      "if_missing": ["scalpel"],
+      "hold_seconds": 1.0,
+      "message": "Scalpel should be put away during suturing."
+    },
+    {
+      "id": "r4",
+      "phase": "irrigation",
+      "if_present": ["suction"],
+      "if_missing": [],
+      "hold_seconds": 1.5,
+      "message": "Suction recommended during irrigation."
+    },
+    {
+      "id": "r5",
+      "phase": "closing",
+      "if_present": ["needle_holder", "scissors"],
+      "if_missing": [],
+      "hold_seconds": 2.0,
+      "message": "Needle holder and scissors for closing."
+    }
+  ]
+}

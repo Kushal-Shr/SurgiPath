@@ -104,7 +104,40 @@ The video callback simulates a detection every ~5 seconds (150 frames at 30 fps)
 
 ---
 
-## Replacing the Mock with Real YOLO
+## Pre-Op / Intra-Op / Post-Op flow (current)
+
+The app can run in demo mode: **Pre-Op** (checklist from webcam + YOLO) → **Intra-Op** (phase + rules) → **Post-Op** (analytics from event log).
+
+- **Run:** `streamlit run app.py` → http://localhost:8501  
+- **Requires:** `models/best.pt`, `recipes/trauma_room.json`. Webcam optional.
+- **Config:** Sidebar sets confidence, inference size, frame skip. Recipe sets `stable_seconds` and intra-op rules.
+
+---
+
+## Development & debugging
+
+Code is split so you can develop and debug by layer:
+
+| Where | What to change / debug |
+|-------|-------------------------|
+| **`app.py`** | Flow, UI, and wiring. Config in sidebar; webcam loop; Pre-Op / Intra-Op / Post-Op sections. Use constants from `src.constants` instead of magic strings. |
+| **`src/constants.py`** | Paths, config defaults, session state key names. Change once here instead of searching the app. |
+| **`src/state.py`** | Mode (PRE_OP / INTRA_OP / POST_OP) and phase. All mode/phase access goes through `get_mode`, `set_mode`, `get_phase`, `set_phase`. |
+| **`src/detector.py`** | YOLO load (cached), inference, count, draw. Add logging or try/except here if inference fails or classes don’t match. |
+| **`src/rules.py`** | Intra-op rule logic and debounce. Rule names and tool names use normalized form (lower, spaces → `_`). |
+| **`src/logger.py`** | Events go to `logs/events.jsonl`. Use `read_events()` in Post-Op or in a script to inspect what was logged. |
+| **`src/utils.py`** | Recipe load and `ToolPresenceSmoother`. Checklist “present” = seen in ≥1 of last N samples. |
+| **`recipes/trauma_room.json`** | Required tools and intra-op rules. Tool names must match YOLO class names when normalized (e.g. `needle_holder` or `Needle Holder`). |
+
+**Tips:**
+
+- Session state keys are in `src.constants` (e.g. `KEY_LAST_COUNTS`, `KEY_ALERTS_LOG`). Use them when reading/writing so renames are in one place.
+- If the checklist never passes, check that recipe `preop_required[].tool` matches your model’s class names (after normalizing: lower, spaces → `_`).
+- To test without a camera, open **Post-Op** and rely on `logs/events.jsonl` (you can append test events manually).
+
+---
+
+## Replacing the Mock with Real YOLO (legacy flow)
 
 Inside `video_frame_callback` there are TODO blocks ready for integration:
 
