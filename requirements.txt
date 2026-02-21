@@ -1,8 +1,9 @@
-# Project Panacea - Surgical AI Dashboard
+# Panacea: Surgical Mastery — AI-Guided Training Simulator
 streamlit
 streamlit-webrtc
 opencv-python-headless
 av
-google-generativeai
+google-genai
 pydantic
+python-dotenv
 mediapipe
