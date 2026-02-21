@@ -1,5 +1,6 @@
 {
   "name": "Trauma Room",
+  "expected_time_seconds": 300,
   "preop_required": [
     { "tool": "scalpel", "min_count": 1 },
     { "tool": "forceps", "min_count": 1 },

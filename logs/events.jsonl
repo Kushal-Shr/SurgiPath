@@ -1,0 +1,46 @@
+{"timestamp": "2026-02-21T21:18:16.013094+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:18:16.015952+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:18:19.188268+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:18:19.189569+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:18:49.657310+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:18:49.659392+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:18:50.006447+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:18:50.007715+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:18:50.496904+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:18:50.498223+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:18:51.425000+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:18:51.426775+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:18:52.427596+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:18:52.428900+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:18:52.913274+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:18:52.914385+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:19:05.314906+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:19:05.316989+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:19:05.924856+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:19:05.925865+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:19:06.541998+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:19:06.543481+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:19:17.021945+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:19:17.023397+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:19:22.858548+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:19:22.860004+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:19:23.230016+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:19:23.231914+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:42:49.759761+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:42:49.761434+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:42:53.530578+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:42:53.532867+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:42:53.985319+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:42:53.987298+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:42:56.665813+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:42:56.668090+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:43:00.530854+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T21:43:00.533386+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T21:43:06.318084+00:00", "type": "ALERT", "mode": "INTRA_OP", "phase": "incision", "rule_id": "r1", "message": "Scalpel in view during incision phase."}
+{"timestamp": "2026-02-21T21:43:32.264234+00:00", "type": "STATE_CHANGE", "mode": "POST_OP", "phase": null, "from": "INTRA_OP", "to": "POST_OP"}
+{"timestamp": "2026-02-21T22:06:49.200418+00:00", "type": "STATE_CHANGE", "mode": "INTRA_OP", "phase": null, "from": "PRE_OP", "to": "INTRA_OP"}
+{"timestamp": "2026-02-21T22:06:49.201821+00:00", "type": "CHECKLIST_STATUS", "mode": "INTRA_OP", "phase": null, "status": "PASS", "readiness_pct": 100}
+{"timestamp": "2026-02-21T22:06:58.660976+00:00", "type": "ALERT", "mode": "INTRA_OP", "phase": "incision", "rule_id": "r1", "message": "Scalpel in view during incision phase."}
+{"timestamp": "2026-02-21T22:07:14.963875+00:00", "type": "PHASE_CHANGE", "mode": "INTRA_OP", "phase": "closing"}
+{"timestamp": "2026-02-21T22:07:26.660514+00:00", "type": "ALERT", "mode": "INTRA_OP", "phase": "closing", "rule_id": "r5", "message": "Needle holder and scissors for closing."}
+{"timestamp": "2026-02-21T22:07:32.135372+00:00", "type": "STATE_CHANGE", "mode": "POST_OP", "phase": null, "from": "INTRA_OP", "to": "POST_OP"}

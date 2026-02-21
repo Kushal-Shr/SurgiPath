@@ -1,9 +1,11 @@
-# Project Panacea - Surgical AI Dashboard
+# MedLab Coach AI - Skill Assessment for Medical Training Labs
 streamlit
+streamlit-autorefresh
 streamlit-webrtc
-opencv-python-headless
+opencv-python
 av
 google-generativeai
 pydantic
 mediapipe
 ultralytics
+plotly
