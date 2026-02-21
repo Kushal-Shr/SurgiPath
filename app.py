@@ -1,42 +1,89 @@
 """
 Panacea: Surgical Mastery — AI-Guided Training Simulator
-Syllabus-driven workflow with mock vision detection and Gemini integration.
+
+================================================================================
+HOW THIS SCRIPT WORKS (for studying)
+================================================================================
+
+This is the main Streamlit entry point. It runs top to bottom on every user
+action (click, slider change, etc.); Streamlit re-runs the whole script and
+updates the page.
+
+  FLOW:
+  1. Page config & CSS
+  2. Define config helpers and session state keys (constants come from src.constants)
+  3. Initialize session state (mode, phase, smoother, alerts, last detections, etc.)
+  4. Load recipe from recipes/trauma_room.json (required tools, params, intraop_rules)
+  5. SIDEBAR: mode badge, config sliders (conf, imgsz, frame_skip), navigation radio
+  6. MAIN AREA:
+     - Header
+     - WEBCAM: only when nav is Pre-Op or Intra-Op and camera works.
+       Opens VideoCapture(0), runs a short loop (FEED_LOOP_FRAMES), runs YOLO
+       every frame_skip frames, updates last_detections/last_counts and the
+       preop smoother, then shows the frame with boxes. Model is loaded once
+       via @st.cache_resource.
+     - PRE-OP SECTION (if nav == "Pre-Op"): checklist table from smoother,
+       readiness %, stable_seconds logic, "Start Surgery" → set mode INTRA_OP,
+       log events, rerun.
+     - INTRA-OP SECTION (if nav == "Intra-Op"): phase dropdown, evaluate_rules()
+       with current counts, append alerts to session_state, show last 10 alerts,
+       "End Surgery" → set mode POST_OP, log, rerun.
+     - POST-OP SECTION (if nav == "Post-Op"): read_events() from logs/events.jsonl,
+       show metrics (total alerts, by phase, checklist pass/fail) and timeline.
+  7. Footer
+
+  KEY CONCEPTS:
+  - Session state (st.session_state) keeps data between reruns. We init it once
+    and use keys from src.constants (KEY_NAV, KEY_LAST_COUNTS, etc.).
+  - Mode (PRE_OP / INTRA_OP / POST_OP) is in state; nav (Pre-Op / Intra-Op / Post-Op)
+    is which tab the user is viewing. "Start Surgery" and "End Surgery" change
+    mode and sync nav.
+  - Tool names: we normalize to lowercase + underscores so recipe tools
+    (e.g. "needle_holder") match YOLO class names (e.g. "Needle Holder") via
+    norm_tool() and counts_for_recipe().
+
+  RUN:
+    streamlit run app.py  →  http://localhost:8501
+  REQUIRES: models/best.pt, recipes/trauma_room.json. Webcam optional.
 """
 
-import json
-import math
-import queue
-import threading
 import time
+from pathlib import Path
 from datetime import datetime
 
-import av
 import cv2
-import numpy as np
 import streamlit as st
-from pydantic import BaseModel, ValidationError
-from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
 from styles import load_css
+from src.constants import (
+    MODEL_PATH,
+    RECIPE_PATH,
+    PHASES,
+    CONF_MIN_DEFAULT,
+    IMGSZ_DEFAULT,
+    FRAME_SKIP_DEFAULT,
+    SMOOTH_WINDOW_SIZE,
+    FEED_LOOP_FRAMES,
+    KEY_NAV,
+    KEY_PREOP_SMOOTHER,
+    KEY_PREOP_STABLE_START,
+    KEY_ALERTS_LOG,
+    KEY_LAST_DETECTIONS,
+    KEY_LAST_COUNTS,
+    KEY_FRAME_INDEX,
+    KEY_CONFIG_CONF_MIN,
+    KEY_CONFIG_IMGSZ,
+    KEY_CONFIG_FRAME_SKIP,
+)
+from src.state import init_state, get_mode, set_mode, get_phase, set_phase
+from src.detector import get_model, infer_tools, count_tools, draw_detections
+from src.logger import log_event, read_events
+from src.rules import evaluate_rules
+from src.utils import load_recipe, ToolPresenceSmoother
 
-# ──────────────────────────────────────────────
-# Pydantic schemas
-# ──────────────────────────────────────────────
-
-class SyllabusStep(BaseModel):
-    step_number: int
-    task: str
-    target_tool: str
-    pro_tip: str
-
-
-class TrainingSyllabus(BaseModel):
-    steps: list[SyllabusStep]
-
-
-# ──────────────────────────────────────────────
-# Page config
-# ──────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Page config & CSS
+# -----------------------------------------------------------------------------
 
 st.set_page_config(
     page_title="Panacea: Surgical Mastery",
@@ -44,578 +91,385 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
 load_css()
 
-# ──────────────────────────────────────────────
-# Session state defaults
-# ──────────────────────────────────────────────
-
-_DEFAULTS: dict = {
-    "app_state": "IDLE",             # IDLE → TRAINING → COMPLETE
-    "module_name": "",
-    "syllabus": None,                # TrainingSyllabus dict
-    "current_step_index": 0,
-    "completed_steps": set(),
-    "latest_pro_tip": "",
-    "training_start_time": None,
-}
-
-for key, val in _DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
-
-# ──────────────────────────────────────────────
-# Thread-safe shared state
-# ──────────────────────────────────────────────
-
-tool_queue: queue.Queue = queue.Queue(maxsize=64)
-
-_shared_lock = threading.Lock()
-_shared_target_tool: list[str] = [""]     # current step's target tool
-_shared_all_tools: list[str] = []         # all target tools in the syllabus
-_frame_counter: list[int] = [0]
+# -----------------------------------------------------------------------------
+# Config: confidence, inference size, frame skip (sidebar uses these keys)
+# -----------------------------------------------------------------------------
 
 
-def set_shared_target(target: str, all_tools: list[str]) -> None:
-    with _shared_lock:
-        _shared_target_tool[0] = target
-        _shared_all_tools.clear()
-        _shared_all_tools.extend(all_tools)
-        _frame_counter[0] = 0
+def get_config() -> dict:
+    """Return current config from session state, with defaults applied."""
+    if KEY_CONFIG_CONF_MIN not in st.session_state:
+        st.session_state[KEY_CONFIG_CONF_MIN] = CONF_MIN_DEFAULT
+    if KEY_CONFIG_IMGSZ not in st.session_state:
+        st.session_state[KEY_CONFIG_IMGSZ] = IMGSZ_DEFAULT
+    if KEY_CONFIG_FRAME_SKIP not in st.session_state:
+        st.session_state[KEY_CONFIG_FRAME_SKIP] = FRAME_SKIP_DEFAULT
+    return {
+        "conf_min": st.session_state[KEY_CONFIG_CONF_MIN],
+        "imgsz": st.session_state[KEY_CONFIG_IMGSZ],
+        "frame_skip": max(1, st.session_state[KEY_CONFIG_FRAME_SKIP]),
+    }
 
 
-def get_shared_target() -> tuple[str, list[str]]:
-    with _shared_lock:
-        return _shared_target_tool[0], list(_shared_all_tools)
+def init_session_state() -> None:
+    """Ensure all session state keys we use exist with safe defaults."""
+    init_state()
+    if KEY_PREOP_SMOOTHER not in st.session_state:
+        st.session_state[KEY_PREOP_SMOOTHER] = ToolPresenceSmoother(
+            window_size=SMOOTH_WINDOW_SIZE
+        )
+    if KEY_PREOP_STABLE_START not in st.session_state:
+        st.session_state[KEY_PREOP_STABLE_START] = None
+    if KEY_ALERTS_LOG not in st.session_state:
+        st.session_state[KEY_ALERTS_LOG] = []
+    if KEY_LAST_DETECTIONS not in st.session_state:
+        st.session_state[KEY_LAST_DETECTIONS] = []
+    if KEY_LAST_COUNTS not in st.session_state:
+        st.session_state[KEY_LAST_COUNTS] = {}
+    if KEY_FRAME_INDEX not in st.session_state:
+        st.session_state[KEY_FRAME_INDEX] = 0
+    if KEY_NAV not in st.session_state:
+        st.session_state[KEY_NAV] = "Pre-Op"
 
 
-# ──────────────────────────────────────────────
-# Training modules
-# ──────────────────────────────────────────────
-
-TRAINING_MODULES = [
-    "Laparoscopic Appendectomy",
-    "Basic Suturing 101",
-    "Cataract Tray Setup",
-]
-
-# ──────────────────────────────────────────────
-# Gemini syllabus generation
-# ──────────────────────────────────────────────
-
-GEMINI_SYLLABUS_PROMPT = (
-    "You are a surgical educator. Generate a 3-step training syllabus "
-    "for {procedure}. Return a JSON object with:\n"
-    '{{"steps": [{{"step_number": 1, "task": "Identify X", '
-    '"target_tool": "tool_name", "pro_tip": "Educational fact"}}]}}\n'
-    "Return ONLY valid JSON. Be specific and educational."
-)
+def norm_tool(name: str) -> str:
+    """Normalize tool name for matching: lower case, spaces → underscores."""
+    return (name or "").strip().lower().replace(" ", "_")
 
 
-def generate_syllabus(procedure: str) -> TrainingSyllabus:
-    """Generate a training syllabus via Gemini 1.5 Flash or hardcoded mock."""
+def counts_for_recipe(
+    counts_normalized: dict[str, int], required_tools: list[dict]
+) -> dict[str, int]:
+    """Map normalized detection counts to recipe tool names for the smoother."""
+    return {
+        r["tool"]: counts_normalized.get(norm_tool(r["tool"]), 0)
+        for r in required_tools
+        if r.get("tool")
+    }
+
+
+# -----------------------------------------------------------------------------
+# Load recipe (once per run) and cached model
+# -----------------------------------------------------------------------------
+
+
+def load_recipe_safe() -> dict:
+    """Load recipe JSON; return empty structure if file missing or invalid."""
     try:
-        api_key = st.secrets.get("GEMINI_API_KEY", "")
+        return load_recipe(RECIPE_PATH)
     except Exception:
-        api_key = ""
-
-    if api_key:
-        import google.generativeai as genai
-
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = GEMINI_SYLLABUS_PROMPT.format(procedure=procedure)
-        response = model.generate_content(prompt)
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-        data = json.loads(raw)
-    else:
-        _MOCK_SYLLABI: dict[str, dict] = {
-            "Laparoscopic Appendectomy": {
-                "steps": [
-                    {
-                        "step_number": 1,
-                        "task": "Identify and present the Laparoscopic Trocar",
-                        "target_tool": "Laparoscopic Trocar",
-                        "pro_tip": (
-                            "The 12 mm umbilical trocar is inserted first to "
-                            "establish pneumoperitoneum. Always confirm intra-"
-                            "abdominal placement with a 0° scope before "
-                            "inserting secondary ports."
-                        ),
-                    },
-                    {
-                        "step_number": 2,
-                        "task": "Locate the Grasper Forceps for mesoappendix retraction",
-                        "target_tool": "Grasper Forceps",
-                        "pro_tip": (
-                            "Atraumatic graspers should be used on the appendix "
-                            "tip to avoid perforation. Apply gentle traction "
-                            "towards the anterior abdominal wall to create a "
-                            "'critical view' of the mesoappendix."
-                        ),
-                    },
-                    {
-                        "step_number": 3,
-                        "task": "Present the Endoscopic Stapler for base ligation",
-                        "target_tool": "Endoscopic Stapler",
-                        "pro_tip": (
-                            "Fire the stapler across the appendiceal base with "
-                            "at least 3 mm of healthy cecal tissue. A single "
-                            "fire is preferred — double-stapling increases "
-                            "tissue necrosis risk."
-                        ),
-                    },
-                ],
-            },
-            "Basic Suturing 101": {
-                "steps": [
-                    {
-                        "step_number": 1,
-                        "task": "Identify and pick up the Needle Driver",
-                        "target_tool": "Needle Driver",
-                        "pro_tip": (
-                            "Grip the needle driver two-thirds of the way back "
-                            "from the tip. The needle should be loaded at the "
-                            "junction of the middle and distal thirds for "
-                            "optimal control and arc."
-                        ),
-                    },
-                    {
-                        "step_number": 2,
-                        "task": "Locate the Tissue Forceps for wound edge eversion",
-                        "target_tool": "Tissue Forceps",
-                        "pro_tip": (
-                            "Adson forceps with teeth provide the best grip on "
-                            "skin without crushing tissue. Always evert wound "
-                            "edges slightly to promote first-intention healing."
-                        ),
-                    },
-                    {
-                        "step_number": 3,
-                        "task": "Present the Suture material for wound closure",
-                        "target_tool": "Suture (3-0 Vicryl)",
-                        "pro_tip": (
-                            "3-0 Vicryl is a braided, absorbable suture ideal "
-                            "for subcutaneous closure. It maintains ~75% tensile "
-                            "strength at 2 weeks and absorbs fully by 70 days."
-                        ),
-                    },
-                ],
-            },
-            "Cataract Tray Setup": {
-                "steps": [
-                    {
-                        "step_number": 1,
-                        "task": "Identify the Phaco Handpiece on the tray",
-                        "target_tool": "Phaco Handpiece",
-                        "pro_tip": (
-                            "The phacoemulsification handpiece uses ultrasonic "
-                            "vibrations at 28–40 kHz to emulsify the lens "
-                            "nucleus. Verify the irrigation/aspiration lines "
-                            "are primed and bubble-free before use."
-                        ),
-                    },
-                    {
-                        "step_number": 2,
-                        "task": "Locate the Capsulorhexis Forceps",
-                        "target_tool": "Capsulorhexis Forceps",
-                        "pro_tip": (
-                            "Utrata forceps are the gold standard for continuous "
-                            "curvilinear capsulorhexis (CCC). Maintain constant "
-                            "anterior chamber depth with viscoelastic to prevent "
-                            "the rhexis from running out peripherally."
-                        ),
-                    },
-                    {
-                        "step_number": 3,
-                        "task": "Present the IOL Injector for lens implantation",
-                        "target_tool": "IOL Injector",
-                        "pro_tip": (
-                            "Load the foldable IOL with viscoelastic coating the "
-                            "cartridge. Advance the plunger slowly and steadily — "
-                            "a controlled injection unfolds the lens within the "
-                            "capsular bag, reducing endothelial cell damage."
-                        ),
-                    },
-                ],
-            },
+        return {
+            "preop_required": [],
+            "params": {"conf_min": CONF_MIN_DEFAULT, "stable_seconds": 2.0},
+            "intraop_rules": [],
         }
-        data = _MOCK_SYLLABI.get(procedure, _MOCK_SYLLABI["Laparoscopic Appendectomy"])
-        time.sleep(2)
-
-    return TrainingSyllabus(**data)
 
 
-# ──────────────────────────────────────────────
-# WebRTC video callback
-# ──────────────────────────────────────────────
-
-_CYAN = (0, 229, 255)
-_GREEN = (0, 230, 118)
-_DARK = (0, 0, 0)
-_YELLOW = (0, 171, 255)
-
-# Detection fires every ~150 frames (~5 seconds at 30 fps)
-_DETECTION_INTERVAL = 150
+@st.cache_resource
+def cached_model():
+    """Load YOLO model once; cached for the session."""
+    return get_model(MODEL_PATH)
 
 
-def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
-    img = frame.to_ndarray(format="bgr24")
-    h, w, _ = img.shape
+recipe = load_recipe_safe()
+preop_required = recipe.get("preop_required", [])
+params = recipe.get("params", {})
+stable_seconds = float(params.get("stable_seconds", 2.0))
+intraop_rules = recipe.get("intraop_rules", [])
 
-    target, all_tools = get_shared_target()
-    if not target:
-        cv2.putText(img, "AWAITING TARGET", (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, _YELLOW, 2)
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+# -----------------------------------------------------------------------------
+# Sidebar: mode badge, config sliders, navigation
+# -----------------------------------------------------------------------------
 
-    _frame_counter[0] += 1
-    fc = _frame_counter[0]
-
-    # TODO: Replace with real YOLO inference
-    # ─────────────────────────────────────────
-    # from ultralytics import YOLO
-    # model = YOLO("yolov11_surgical_tools.pt")
-    # results = model(img, conf=0.5)
-    # ─────────────────────────────────────────
-
-    # ── HUD: current target ──
-    cv2.putText(img, f"TARGET: {target}", (15, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, _CYAN, 2)
-
-    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    cv2.putText(img, ts, (15, h - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, _CYAN, 1)
-
-    # Detect every ~5 seconds: draw a bounding box and push to queue
-    is_detecting = (fc % _DETECTION_INTERVAL) >= (_DETECTION_INTERVAL - 60)
-
-    if is_detecting:
-        # Animated box that "locks on"
-        progress = ((fc % _DETECTION_INTERVAL) - (_DETECTION_INTERVAL - 60)) / 60.0
-        margin = int(40 * (1 - progress))
-
-        cx, cy = w // 2, h // 2
-        box_w, box_h = int(w * 0.40), int(h * 0.45)
-        x1 = cx - box_w // 2 + margin
-        y1 = cy - box_h // 2 + margin
-        x2 = cx + box_w // 2 - margin
-        y2 = cy + box_h // 2 - margin
-
-        color = _GREEN if progress > 0.8 else _CYAN
-
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-
-        # Corner brackets for lock-on effect
-        bracket = 20
-        for (bx, by, dx, dy) in [
-            (x1, y1, 1, 1), (x2, y1, -1, 1),
-            (x1, y2, 1, -1), (x2, y2, -1, -1),
-        ]:
-            cv2.line(img, (bx, by), (bx + dx * bracket, by), color, 3)
-            cv2.line(img, (bx, by), (bx, by + dy * bracket), color, 3)
-
-        conf = 0.75 + 0.23 * progress
-        label = f"{target}  [{conf:.2f}]"
-        (tw, th_text), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-        cv2.rectangle(img, (x1, y1 - th_text - 12), (x1 + tw + 10, y1), color, -1)
-        cv2.putText(img, label, (x1 + 5, y1 - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, _DARK, 2)
-
-        if progress > 0.8:
-            cv2.putText(img, "LOCKED", (x1 + 5, y2 + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, _GREEN, 2)
-
-    # At the end of a detection cycle, push the tool name
-    if fc > 0 and fc % _DETECTION_INTERVAL == 0:
-        try:
-            tool_queue.put_nowait(target)
-        except queue.Full:
-            pass
-
-    # Scanning animation bar at bottom
-    scan_x = int((fc % 120) / 120.0 * w)
-    cv2.line(img, (scan_x, h - 4), (min(scan_x + 60, w), h - 4), _CYAN, 3)
-
-    return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-
-# ──────────────────────────────────────────────
-# Sidebar — module selector & training controls
-# ──────────────────────────────────────────────
+init_session_state()
 
 with st.sidebar:
     st.markdown(
         '<div class="dashboard-header">'
         "<h1>🩺 Panacea</h1>"
-        "<p>Surgical Mastery Trainer</p>"
+        "<p>Pre-Op → Intra-Op → Post-Op</p>"
         "</div>",
         unsafe_allow_html=True,
     )
-
-    state = st.session_state.app_state
-
-    # Status badge
+    mode = get_mode()
     badge_map = {
-        "IDLE": ("● Awaiting Module", "status-idle"),
-        "TRAINING": ("● Training Active", "status-active"),
-        "COMPLETE": ("● Module Complete", "status-ready"),
+        "PRE_OP": ("● Pre-Op", "status-idle"),
+        "INTRA_OP": ("● Intra-Op", "status-active"),
+        "POST_OP": ("● Post-Op", "status-ready"),
     }
-    badge_text, badge_cls = badge_map.get(state, badge_map["IDLE"])
+    badge_text, badge_cls = badge_map.get(mode, badge_map["PRE_OP"])
     st.markdown(
         f'<span class="status-badge {badge_cls}">{badge_text}</span>',
         unsafe_allow_html=True,
     )
-
     st.markdown("---")
-    st.markdown("### Select Your Training Module")
-
-    selected_module = st.selectbox(
-        "Training module",
-        TRAINING_MODULES,
-        label_visibility="collapsed",
-        disabled=state == "TRAINING",
+    st.markdown("### Config")
+    st.session_state[KEY_CONFIG_CONF_MIN] = st.slider(
+        "Confidence min", 0.2, 0.9,
+        st.session_state.get(KEY_CONFIG_CONF_MIN, CONF_MIN_DEFAULT), 0.05
     )
+    imgsz_opts = [320, 416, 640, 832]
+    current_imgsz = st.session_state.get(KEY_CONFIG_IMGSZ, IMGSZ_DEFAULT)
+    idx = imgsz_opts.index(current_imgsz) if current_imgsz in imgsz_opts else 2
+    st.session_state[KEY_CONFIG_IMGSZ] = st.selectbox(
+        "Inference size", imgsz_opts, index=idx
+    )
+    st.session_state[KEY_CONFIG_FRAME_SKIP] = st.number_input(
+        "Frame skip (inference every N frames)",
+        min_value=1, max_value=10, value=FRAME_SKIP_DEFAULT, step=1
+    )
+    cfg = get_config()
+    st.caption(f"conf={cfg['conf_min']} imgsz={cfg['imgsz']} skip={cfg['frame_skip']}")
+    st.markdown("---")
+    st.markdown("### Navigation")
+    nav = st.radio(
+        "Section",
+        ["Pre-Op", "Intra-Op", "Post-Op"],
+        index=["Pre-Op", "Intra-Op", "Post-Op"].index(st.session_state[KEY_NAV]),
+        label_visibility="collapsed",
+        key="nav_radio",
+    )
+    st.session_state[KEY_NAV] = nav
 
-    if state == "IDLE":
-        init_clicked = st.button(
-            "🧠  Initialize Training",
-            use_container_width=True,
-        )
-
-        if init_clicked:
-            with st.status("Gemini is building your syllabus…", expanded=True) as status:
-                st.write(f"**Module:** {selected_module}")
-                st.write("Querying Gemini 1.5 Flash for structured syllabus…")
-
-                try:
-                    syllabus = generate_syllabus(selected_module)
-                except (json.JSONDecodeError, ValidationError) as exc:
-                    status.update(label="Failed to generate syllabus", state="error")
-                    st.error(f"Gemini response error: {exc}")
-                    st.stop()
-
-                st.write(f"Received **{len(syllabus.steps)}** training steps.")
-                for step in syllabus.steps:
-                    st.write(f"  Step {step.step_number}: {step.task}")
-                status.update(label="Syllabus ready!", state="complete")
-
-            st.session_state.module_name = selected_module
-            st.session_state.syllabus = syllabus.model_dump()
-            st.session_state.current_step_index = 0
-            st.session_state.completed_steps = set()
-            st.session_state.latest_pro_tip = ""
-            st.session_state.training_start_time = datetime.now().isoformat()
-            st.session_state.app_state = "TRAINING"
-            st.rerun()
-
-    elif state in ("TRAINING", "COMPLETE"):
-        if st.button("🔄  Reset Module", use_container_width=True):
-            st.session_state.app_state = "IDLE"
-            st.session_state.syllabus = None
-            st.session_state.completed_steps = set()
-            st.session_state.current_step_index = 0
-            st.session_state.latest_pro_tip = ""
-            set_shared_target("", [])
-            st.rerun()
-
-    # Sidebar metrics when training
-    if state in ("TRAINING", "COMPLETE") and st.session_state.syllabus:
-        syllabus = st.session_state.syllabus
-        n_steps = len(syllabus["steps"])
-        n_done = len(st.session_state.completed_steps)
-        pct = int(n_done / n_steps * 100) if n_steps else 0
-
-        st.markdown("---")
-        st.markdown(
-            f'<div class="progress-ring">'
-            f'<div class="pct">{pct}%</div>'
-            f'<div class="pct-label">Steps Complete ({n_done}/{n_steps})</div>'
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("### System")
-        m1, m2 = st.columns(2)
-        with m1:
-            st.markdown(
-                '<div class="metric-card">'
-                '<div class="value">30</div>'
-                '<div class="label">FPS</div>'
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        with m2:
-            st.markdown(
-                '<div class="metric-card">'
-                '<div class="value">~5s</div>'
-                '<div class="label">Detect Cycle</div>'
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-
-# ──────────────────────────────────────────────
-# Main area — header
-# ──────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Main header
+# -----------------------------------------------------------------------------
 
 st.markdown(
     '<div class="dashboard-header">'
     "<h1>PANACEA: SURGICAL MASTERY</h1>"
-    "<p>AI-Guided Training Simulator • Gemini 1.5 Flash • YOLOv11</p>"
+    "<p>Pre-Op Checklist • Intra-Op Monitoring • Post-Op Analytics • YOLO Tool Detection</p>"
     "</div>",
     unsafe_allow_html=True,
 )
 
+# -----------------------------------------------------------------------------
+# Webcam + YOLO inference (only when Pre-Op or Intra-Op and camera available)
+# -----------------------------------------------------------------------------
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# IDLE state — welcome screen
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def open_camera() -> cv2.VideoCapture | None:
+    """Open default webcam; return None if unavailable."""
+    try:
+        cap = cv2.VideoCapture(0)
+        if cap.isOpened():
+            return cap
+        cap.release()
+    except Exception:
+        pass
+    return None
 
-if st.session_state.app_state == "IDLE":
-    st.markdown("")
-    st.markdown("")
-    cols = st.columns([1, 2, 1])
-    with cols[1]:
-        st.markdown(
-            '<div class="dashboard-header" style="text-align:center;padding:3rem 2rem;">'
-            "<h2>Welcome to Surgical Mastery</h2>"
-            '<p style="font-size:1rem;margin-top:0.8rem;">'
-            "Select a training module from the sidebar and click "
-            "<strong>Initialize Training</strong> to begin.<br><br>"
-            "Gemini will generate a structured syllabus, then the camera "
-            "will guide you through identifying each surgical instrument."
-            "</p></div>",
-            unsafe_allow_html=True,
+
+video_placeholder = st.empty()
+run_feed = nav in ("Pre-Op", "Intra-Op") and mode in ("PRE_OP", "INTRA_OP")
+cap = open_camera() if run_feed else None
+
+if run_feed and cap is not None:
+    try:
+        model = cached_model()
+    except FileNotFoundError:
+        model = None
+        video_placeholder.error(
+            f"Model not found: {MODEL_PATH}. Place weights at models/best.pt"
         )
 
+    if model is not None:
+        cfg = get_config()
+        frame_index = st.session_state[KEY_FRAME_INDEX]
+        smoother = st.session_state[KEY_PREOP_SMOOTHER]
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TRAINING / COMPLETE — 70/30 layout
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        for _ in range(FEED_LOOP_FRAMES):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_index += 1
+            run_inference = (frame_index % cfg["frame_skip"]) == 0
 
-elif st.session_state.app_state in ("TRAINING", "COMPLETE"):
-    syllabus = st.session_state.syllabus
-    steps = syllabus["steps"]
-    n_steps = len(steps)
-    current_idx = st.session_state.current_step_index
+            if run_inference:
+                detections = infer_tools(
+                    frame,
+                    conf=cfg["conf_min"],
+                    imgsz=cfg["imgsz"],
+                    model=model,
+                )
+                counts_raw = count_tools(detections)
+                counts_norm = {norm_tool(k): v for k, v in counts_raw.items()}
+                st.session_state[KEY_LAST_DETECTIONS] = detections
+                st.session_state[KEY_LAST_COUNTS] = counts_norm
+                counts_for_smoother = counts_for_recipe(counts_norm, preop_required)
+                smoother.update(counts_for_smoother, preop_required)
+            else:
+                detections = st.session_state.get(KEY_LAST_DETECTIONS, [])
 
-    # ── Drain the tool_queue and advance steps ──
-    while not tool_queue.empty():
-        try:
-            detected = tool_queue.get_nowait()
-            if current_idx < n_steps:
-                current_step = steps[current_idx]
-                if detected == current_step["target_tool"]:
-                    st.session_state.completed_steps.add(current_idx)
-                    st.session_state.latest_pro_tip = current_step["pro_tip"]
-                    st.session_state.current_step_index = current_idx + 1
-                    current_idx = st.session_state.current_step_index
+            frame = draw_detections(frame, detections)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
+            time.sleep(0.033)
 
-                    if current_idx >= n_steps:
-                        st.session_state.app_state = "COMPLETE"
-        except queue.Empty:
-            break
+        st.session_state[KEY_FRAME_INDEX] = frame_index
 
-    # Update shared target for the video callback thread
-    if current_idx < n_steps:
-        target_tool = steps[current_idx]["target_tool"]
+    if cap is not None:
+        cap.release()
+
+elif run_feed:
+    video_placeholder.warning(
+        "Camera not available. Connect a webcam and refresh, or use another device."
+    )
+
+# -----------------------------------------------------------------------------
+# Pre-Op: checklist table, readiness %, Start Surgery button
+# -----------------------------------------------------------------------------
+
+if nav == "Pre-Op":
+    st.subheader("Pre-Op Checklist")
+    smoother = st.session_state[KEY_PREOP_SMOOTHER]
+    readiness = smoother.readiness_counts(preop_required) if preop_required else {}
+    all_present = smoother.all_present(preop_required)
+    now_ts = time.time()
+
+    if all_present:
+        if st.session_state[KEY_PREOP_STABLE_START] is None:
+            st.session_state[KEY_PREOP_STABLE_START] = now_ts
     else:
-        target_tool = ""
-    all_tools = [s["target_tool"] for s in steps]
-    set_shared_target(target_tool, all_tools)
+        st.session_state[KEY_PREOP_STABLE_START] = None
 
-    # ── 70/30 columns ──
-    col_video, col_syllabus = st.columns([7, 3])
+    stable_start = st.session_state[KEY_PREOP_STABLE_START]
+    stable_elapsed = (now_ts - stable_start) if stable_start else 0
+    checklist_pass = all_present and (stable_elapsed >= stable_seconds)
 
-    # ── LEFT: Video feed + tutor message ──
-    with col_video:
-        st.markdown(f"### 🎥 Live Feed — {st.session_state.module_name}")
-        st.markdown('<div class="video-container">', unsafe_allow_html=True)
+    n_required = len(preop_required)
+    n_ok = sum(1 for r in preop_required if readiness.get(r["tool"], (0, False))[1])
+    readiness_pct = int(100 * n_ok / n_required) if n_required else 100
+    st.progress(readiness_pct / 100.0)
+    status_text = (
+        "PASS (stable)" if checklist_pass
+        else "Not yet stable" if all_present
+        else "Missing tools"
+    )
+    st.caption(
+        f"Readiness: {n_ok}/{n_required} tools ({readiness_pct}%) — {status_text}"
+    )
 
-        ctx = webrtc_streamer(
-            key="panacea-training-feed",
-            mode=WebRtcMode.SENDRECV,
-            video_frame_callback=video_frame_callback,
-            media_stream_constraints={"video": True, "audio": False},
-            async_processing=True,
+    if preop_required:
+        table_header = ("Tool", "Min", "Detected (window)", "Status")
+        table_rows = []
+        for r in preop_required:
+            tool = r["tool"]
+            min_count = r.get("min_count", 1)
+            detected, is_ok = readiness.get(tool, (0, False))
+            status = "OK" if is_ok else "MISSING"
+            table_rows.append((tool, min_count, detected, status))
+        st.table([table_header] + table_rows)
+
+    if checklist_pass:
+        if st.button("Start Surgery", type="primary", use_container_width=True):
+            set_mode("INTRA_OP")
+            st.session_state[KEY_NAV] = "Intra-Op"
+            log_event("STATE_CHANGE", {"from": "PRE_OP", "to": "INTRA_OP"}, mode="INTRA_OP")
+            log_event("CHECKLIST_STATUS", {"status": "PASS", "readiness_pct": readiness_pct}, mode="INTRA_OP")
+            st.rerun()
+    else:
+        st.button(
+            "Start Surgery",
+            disabled=True,
+            use_container_width=True,
+            help="Complete checklist and hold stable for required time.",
         )
 
-        st.markdown("</div>", unsafe_allow_html=True)
+# -----------------------------------------------------------------------------
+# Intra-Op: phase dropdown, rule evaluation, alerts panel, End Surgery button
+# -----------------------------------------------------------------------------
 
-        # ── Tutor's Message box ──
-        pro_tip = st.session_state.latest_pro_tip
-        if pro_tip:
-            st.markdown(
-                f'<div class="tutor-box has-tip">'
-                f'<div class="tutor-label">🎓 Tutor\'s Message</div>'
-                f'<div class="tutor-text">{pro_tip}</div>'
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+if nav == "Intra-Op":
+    st.subheader("Intra-Op Monitoring")
+    phase = st.selectbox(
+        "Phase",
+        PHASES,
+        index=PHASES.index(get_phase()) if get_phase() in PHASES else 0,
+        key="phase_select",
+    )
+    prev_phase = get_phase()
+    set_phase(phase)
+    if phase != prev_phase:
+        log_event("PHASE_CHANGE", {"phase": phase}, mode="INTRA_OP", phase=phase)
+
+    counts = st.session_state.get(KEY_LAST_COUNTS, {})
+    dt_seconds = (FEED_LOOP_FRAMES * 0.033) / max(1, get_config()["frame_skip"])
+    alerts = evaluate_rules(phase, counts, intraop_rules, dt_seconds, st.session_state)
+
+    for a in alerts:
+        st.session_state[KEY_ALERTS_LOG].append({
+            "ts": datetime.now().isoformat(),
+            "phase": a.get("phase", phase),
+            "message": a.get("message", ""),
+            "rule_id": a.get("rule_id", ""),
+        })
+        log_event(
+            "ALERT",
+            {"rule_id": a.get("rule_id"), "message": a.get("message")},
+            mode="INTRA_OP",
+            phase=phase,
+        )
+
+    alerts_log = st.session_state.get(KEY_ALERTS_LOG, [])[-10:]
+    st.markdown("**Last 10 alerts**")
+    if alerts_log:
+        for e in reversed(alerts_log):
+            st.markdown(f"- [{e.get('ts', '')}] **{e.get('phase', '')}**: {e.get('message', '')}")
+    else:
+        st.caption("No alerts yet.")
+
+    if st.button("End Surgery", type="primary", use_container_width=True):
+        set_mode("POST_OP")
+        st.session_state[KEY_NAV] = "Post-Op"
+        log_event("STATE_CHANGE", {"from": "INTRA_OP", "to": "POST_OP"}, mode="POST_OP")
+        st.rerun()
+
+# -----------------------------------------------------------------------------
+# Post-Op: event log summary (alerts, checklist, timeline)
+# -----------------------------------------------------------------------------
+
+if nav == "Post-Op":
+    st.subheader("Post-Op Analytics")
+    events = read_events()
+    alerts_ev = [e for e in events if e.get("type") == "ALERT"]
+    checklist_ev = [e for e in events if e.get("type") == "CHECKLIST_STATUS"]
+    by_phase = {}
+    for e in alerts_ev:
+        p = e.get("phase", "unknown")
+        by_phase[p] = by_phase.get(p, 0) + 1
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total alerts", len(alerts_ev))
+    with col2:
+        st.metric("Phases with alerts", len(by_phase))
+    with col3:
+        if not checklist_ev:
+            pass_fail = "N/A"
+        elif any(e.get("status") == "PASS" for e in checklist_ev):
+            pass_fail = "PASS"
         else:
-            if current_idx < n_steps:
-                hint = f"Present the <strong>{steps[current_idx]['target_tool']}</strong> to the camera to proceed."
-            else:
-                hint = "All steps completed!"
-            st.markdown(
-                f'<div class="tutor-box">'
-                f'<div class="tutor-label">🎓 Tutor\'s Message</div>'
-                f'<div class="tutor-text">{hint}</div>'
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+            pass_fail = "FAIL"
+        st.metric("Checklist", pass_fail)
 
-    # ── RIGHT: Live syllabus ──
-    with col_syllabus:
-        st.markdown("### 📋 Live Syllabus")
+    st.markdown("**Alerts by phase**")
+    if by_phase:
+        st.json(by_phase)
+    else:
+        st.caption("None")
 
-        for i, step in enumerate(steps):
-            if i in st.session_state.completed_steps:
-                css_cls = "step-completed"
-                icon = "✓"
-            elif i == current_idx:
-                css_cls = "step-active"
-                icon = str(step["step_number"])
-            else:
-                css_cls = "step-pending"
-                icon = str(step["step_number"])
+    st.markdown("**Timeline (last 50 events)**")
+    for e in events[-50:]:
+        st.caption(
+            f"{e.get('timestamp', '')} | {e.get('type', '')} | "
+            f"mode={e.get('mode', '')} | phase={e.get('phase', '')}"
+        )
 
-            st.markdown(
-                f'<div class="syllabus-step {css_cls}">'
-                f'  <div class="step-header">'
-                f'    <div class="step-num">{icon}</div>'
-                f'    <div class="step-task">{step["task"]}</div>'
-                f"  </div>"
-                f'  <div class="step-tool">Target: <span>{step["target_tool"]}</span></div>'
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-        # Completion banner
-        if st.session_state.app_state == "COMPLETE":
-            st.markdown(
-                '<div class="completion-banner">'
-                "<h2>🏆 Module Complete!</h2>"
-                "<p>All instruments identified successfully. "
-                "Reset from the sidebar to try another module.</p>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-
-# ──────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Footer
-# ──────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 st.markdown("---")
-ft1, ft2, ft3 = st.columns(3)
-with ft1:
-    st.caption("Panacea: Surgical Mastery v1.0.0")
-with ft2:
-    st.caption("Gemini 1.5 Flash • YOLOv11 • WebRTC")
-with ft3:
-    st.caption(f"Session: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+st.caption(f"Panacea • {datetime.now().strftime('%Y-%m-%d %H:%M')}")

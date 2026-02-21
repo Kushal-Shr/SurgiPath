@@ -6,3 +6,4 @@ av
 google-generativeai
 pydantic
 mediapipe
+ultralytics
