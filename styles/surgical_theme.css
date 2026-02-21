@@ -39,7 +39,8 @@ html, body, [data-testid="stAppViewContainer"] {
 [data-testid="stSidebar"] h4,
 [data-testid="stSidebar"] p,
 [data-testid="stSidebar"] span,
-[data-testid="stSidebar"] label {
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] div {
     color: var(--text-primary) !important;
 }
 
@@ -68,113 +69,9 @@ h1, h2, h3, h4 {
 }
 
 .dashboard-header p {
-    color: var(--text-secondary);
+    color: var(--text-secondary) !important;
     margin: 0.2rem 0 0 0;
     font-size: 0.9rem;
-}
-
-/* ── Phase indicator bar ── */
-
-.phase-bar {
-    display: flex;
-    gap: 0;
-    margin: 1.5rem 0;
-    border-radius: 10px;
-    overflow: hidden;
-    border: 1px solid var(--cyan-dim);
-}
-
-.phase-step {
-    flex: 1;
-    padding: 0.8rem 1rem;
-    text-align: center;
-    font-size: 0.8rem;
-    font-weight: 600;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    background: var(--bg-card);
-    color: var(--text-secondary);
-    border-right: 1px solid var(--cyan-dim);
-    transition: all 0.3s ease;
-}
-
-.phase-step:last-child {
-    border-right: none;
-}
-
-.phase-step.active {
-    background: linear-gradient(135deg, var(--cyan-dim), #004d5a);
-    color: #ffffff;
-    box-shadow: inset 0 0 20px rgba(0,229,255,0.1);
-}
-
-.phase-step.completed {
-    background: rgba(0,230,118,0.12);
-    color: var(--success);
-}
-
-.phase-step .phase-num {
-    display: block;
-    font-size: 1.1rem;
-    margin-bottom: 0.2rem;
-}
-
-/* ── Input phase card ── */
-
-.input-card {
-    background: var(--bg-card);
-    border: 1px solid var(--cyan-dim);
-    border-radius: 16px;
-    padding: 2.5rem;
-    margin: 1rem auto;
-    max-width: 700px;
-    text-align: center;
-    box-shadow: 0 0 40px var(--cyan-glow);
-}
-
-.input-card h2 {
-    font-size: 1.5rem;
-    margin-bottom: 0.5rem;
-}
-
-.input-card p {
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-    margin-bottom: 1.5rem;
-}
-
-/* ── Ready phase ── */
-
-.ready-card {
-    background: var(--bg-card);
-    border: 1px solid var(--success);
-    border-radius: 16px;
-    padding: 2rem;
-    margin: 1rem auto;
-    max-width: 700px;
-    text-align: center;
-    box-shadow: 0 0 30px rgba(0,230,118,0.1);
-}
-
-.ready-card h2 {
-    color: var(--success) !important;
-}
-
-.checklist-preview {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    justify-content: center;
-    margin: 1.5rem 0;
-}
-
-.checklist-tag {
-    background: var(--bg-secondary);
-    border: 1px solid var(--cyan-dim);
-    border-radius: 20px;
-    padding: 0.4rem 1rem;
-    font-size: 0.8rem;
-    color: var(--text-primary);
 }
 
 /* ── Status badge ── */
@@ -191,19 +88,19 @@ h1, h2, h3, h4 {
 
 .status-active {
     background: rgba(0,230,118,0.15);
-    color: var(--success);
+    color: var(--success) !important;
     border: 1px solid var(--success);
 }
 
 .status-idle {
     background: rgba(136,153,170,0.15);
-    color: var(--text-secondary);
+    color: var(--text-secondary) !important;
     border: 1px solid var(--text-secondary);
 }
 
 .status-ready {
     background: rgba(255,171,0,0.15);
-    color: var(--warning);
+    color: var(--warning) !important;
     border: 1px solid var(--warning);
 }
 
@@ -216,66 +113,153 @@ h1, h2, h3, h4 {
     box-shadow: 0 0 30px var(--cyan-glow);
 }
 
-/* ── AI reasoning feed ── */
+/* ── Syllabus step cards ── */
 
-.reasoning-feed {
+.syllabus-step {
+    background: var(--bg-card);
+    border: 1px solid transparent;
+    border-radius: 12px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 0.8rem;
+    transition: all 0.3s ease;
+    position: relative;
+}
+
+.syllabus-step .step-header {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    margin-bottom: 0.4rem;
+}
+
+.syllabus-step .step-num {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+    border: 2px solid var(--text-secondary);
+    color: var(--text-secondary);
+    background: transparent;
+}
+
+.syllabus-step .step-task {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.syllabus-step .step-tool {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-left: 2.6rem;
+    margin-top: 0.2rem;
+}
+
+.syllabus-step .step-tool span {
+    color: var(--cyan-accent) !important;
+    font-weight: 600;
+}
+
+/* Active step */
+.syllabus-step.step-active {
+    border-color: var(--cyan-accent);
+    box-shadow: 0 0 20px var(--cyan-glow);
+    background: linear-gradient(135deg, var(--bg-card) 0%, rgba(0,151,167,0.08) 100%);
+}
+
+.syllabus-step.step-active .step-num {
+    border-color: var(--cyan-accent);
+    color: var(--bg-primary);
+    background: var(--cyan-accent);
+    animation: pulse-ring 2s ease-in-out infinite;
+}
+
+@keyframes pulse-ring {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0,229,255,0.4); }
+    50% { box-shadow: 0 0 0 8px rgba(0,229,255,0); }
+}
+
+/* Completed step */
+.syllabus-step.step-completed {
+    border-color: var(--success);
+    background: rgba(0,230,118,0.04);
+}
+
+.syllabus-step.step-completed .step-num {
+    border-color: var(--success);
+    color: var(--bg-primary);
+    background: var(--success);
+}
+
+.syllabus-step.step-completed .step-task {
+    color: var(--success);
+}
+
+/* Pending step */
+.syllabus-step.step-pending {
+    opacity: 0.5;
+}
+
+/* ── Tutor message box ── */
+
+.tutor-box {
     background: var(--bg-card);
     border: 1px solid var(--cyan-dim);
     border-radius: 12px;
-    padding: 1.2rem;
+    padding: 1.2rem 1.5rem;
     margin-top: 1rem;
-    max-height: 300px;
-    overflow-y: auto;
+    position: relative;
 }
 
-.reasoning-entry {
-    background: var(--bg-secondary);
-    border-left: 3px solid var(--cyan-accent);
-    border-radius: 0 8px 8px 0;
-    padding: 0.8rem 1rem;
-    margin-bottom: 0.6rem;
-    font-size: 0.85rem;
-    line-height: 1.5;
-}
-
-.reasoning-entry .timestamp {
-    color: var(--cyan-dim);
+.tutor-box .tutor-label {
     font-size: 0.7rem;
-    font-weight: 500;
-}
-
-/* ── Sidebar checklist items ── */
-
-.checklist-item {
-    background: var(--bg-card);
-    border-radius: 8px;
-    padding: 0.7rem 1rem;
-    margin-bottom: 0.5rem;
-    border: 1px solid transparent;
-    transition: all 0.3s;
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-}
-
-.checklist-item:hover {
-    border-color: var(--cyan-dim);
-}
-
-.checklist-item.verified {
-    border-color: var(--success);
-    background: rgba(0,230,118,0.05);
-}
-
-.tool-detected {
-    color: var(--success);
     font-weight: 600;
-    font-size: 0.95rem;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--cyan-dim);
+    margin-bottom: 0.5rem;
 }
 
-.tool-missing {
-    color: var(--text-secondary);
+.tutor-box .tutor-text {
     font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+}
+
+.tutor-box.has-tip {
+    border-color: var(--success);
+    box-shadow: 0 0 20px rgba(0,230,118,0.08);
+}
+
+.tutor-box.has-tip .tutor-label {
+    color: var(--success);
+}
+
+/* ── Completion banner ── */
+
+.completion-banner {
+    background: linear-gradient(135deg, rgba(0,230,118,0.12) 0%, rgba(0,151,167,0.12) 100%);
+    border: 1px solid var(--success);
+    border-radius: 16px;
+    padding: 2rem;
+    text-align: center;
+    margin: 1rem 0;
+    box-shadow: 0 0 30px rgba(0,230,118,0.1);
+}
+
+.completion-banner h2 {
+    color: var(--success) !important;
+    margin-bottom: 0.3rem;
+}
+
+.completion-banner p {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
 }
 
 /* ── Metric cards ── */
@@ -301,7 +285,7 @@ h1, h2, h3, h4 {
     letter-spacing: 1px;
 }
 
-/* ── Progress ring for checklist completion ── */
+/* ── Progress ring ── */
 
 .progress-ring {
     background: var(--bg-card);
