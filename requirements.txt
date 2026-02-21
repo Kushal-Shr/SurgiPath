@@ -1,0 +1,8 @@
+# Project Panacea - Surgical AI Dashboard
+streamlit
+streamlit-webrtc
+opencv-python-headless
+av
+google-generativeai
+pydantic
+mediapipe
