@@ -1,676 +1,1222 @@
 """
-MedLab Coach AI — AI-Guided Skill Assessment for Medical Training Labs
-
-================================================================================
-HOW THIS SCRIPT WORKS (for studying)
-================================================================================
-
-This is the main Streamlit entry point. Streamlit re-runs top to bottom on
-every user interaction. State persists via st.session_state.
-
-  FLOW:
-  1. Page config, CSS
-  2. Session state init (mode, smoother, streak, video source, etc.)
-  3. Load recipe (required tools, params, rules, expected_time_seconds)
-  4. SIDEBAR: branding, video source selector, nav radio, settings
-  5. MAIN AREA:
-     - Header
-     - VIDEO FEED: a single @st.fragment(run_every=1s) grabs camera frames
-       and renders them as base64 data-URIs (avoids Streamlit media-file
-       storage race conditions). A slower st_autorefresh(4s) triggers full-
-       page reruns so the Setup checklist picks up smoother data.
-     - SETUP tab: tool checklist, readiness %, "Begin Lab Session" button
-     - PRACTICE tab: phase dropdown, alerts panel, streak counter, "End Session"
-     - REPORT tab: rubric radar chart (Plotly), metrics, export JSON/CSV
-
-  RUN:
-    streamlit run app.py  →  http://localhost:8501
+SurgiPath — AI-Guided Training Simulator
+UI and video pipeline. All AI logic lives in brain.py (Clarity AI).
 """
 
-import base64
-import time
-import json
+import os
+import queue
 import random
-import tempfile
-from pathlib import Path
-from datetime import datetime, timedelta
+import threading
+import time
+from datetime import datetime
 
+import av
 import cv2
-import numpy as np
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
-from styles import load_css
-from src.constants import (
-    MODEL_PATH, RECIPE_PATH, PHASES, PHASE_LABELS, SAMPLE_VIDEO_PATH,
-    CONF_MIN_DEFAULT, IMGSZ_DEFAULT, FRAME_SKIP_DEFAULT,
-    SMOOTH_WINDOW_SIZE, FEED_LOOP_FRAMES,
-    KEY_NAV, KEY_PREOP_SMOOTHER, KEY_PREOP_STABLE_START,
-    KEY_ALERTS_LOG, KEY_LAST_DETECTIONS, KEY_LAST_COUNTS,
-    KEY_FRAME_INDEX, KEY_CONFIG_CONF_MIN, KEY_CONFIG_IMGSZ,
-    KEY_CONFIG_FRAME_SKIP, KEY_CAMERA,
-    KEY_VIDEO_SOURCE, KEY_UPLOADED_FILE,
-    KEY_STREAK_SECONDS, KEY_STREAK_BEST,
-    KEY_SESSION_START, KEY_HAND_STABILITY,
-    KEY_DEMO_MODE, KEY_DEMO_TICK,
+from brain import (
+    STANDARD_TOOL_KEYS,
+    SKIP_PENALTY,
+    TIMER_PENALTY,
+    ActionSuccess,
+    LiveProctor,
+    SyllabusError,
+    check_student_action,
+    generate_dynamic_syllabus,
+    generate_final_critique,
+    generate_learning_resources,
+    generate_session_report,
+    generate_skip_warning,
+    get_live_proctor,
+    set_live_proctor,
 )
-from src.state import init_state, get_mode, set_mode, get_phase, set_phase
-from src.detector import get_model, infer_tools, count_tools, draw_detections
-from src.logger import log_event, read_events
-from src.rules import evaluate_rules
-from src.utils import load_recipe, ToolPresenceSmoother
-from src.scoring import compute_rubric, rubric_to_json, events_to_csv
+from styles import load_css
 
-# =============================================================================
-# Page config & CSS
-# =============================================================================
+try:
+    from ultralytics import YOLO
+except ImportError:
+    YOLO = None  # type: ignore[assignment,misc]
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None  # type: ignore[assignment,misc]
+
+# ──────────────────────────────────────────────
+# Page config
+# ──────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="MedLab Coach AI",
-    page_icon="🧪",
+    page_title="SurgiPath",
+    page_icon="🩺",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
 load_css()
 
-# =============================================================================
-# Helpers
-# =============================================================================
+# ──────────────────────────────────────────────
+# Session state defaults
+# ──────────────────────────────────────────────
+
+_DEFAULTS: dict = {
+    "app_state": "IDLE",
+    "module_name": "",
+    "syllabus": None,
+    "current_step_index": 0,
+    "completed_steps": set(),
+    "latest_rationale": "",
+    "proctor_log": [],
+    "training_start_time": None,
+    "demo_mode": False,
+    "demo_injection": None,
+    "mastery_score": 100,
+    "skipped_steps": [],
+    "session_report": "",
+    "action_log": [],
+    "event_log": [],
+    "clarity_feedback": [],
+    "step_start_time": 0.0,
+    "final_critique": "",
+    "learning_resources": "",
+}
+
+for key, val in _DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+# ──────────────────────────────────────────────
+# Thread-safe shared state (for WebRTC mode)
+# ──────────────────────────────────────────────
+
+tool_queue: queue.Queue = queue.Queue(maxsize=64)
+
+_shared_lock = threading.Lock()
+_shared_target_tool: list[str] = [""]
+_shared_all_tools: list[str] = []
+_shared_wrong_tools: list[str] = []
 
 
-def get_config() -> dict:
-    if KEY_CONFIG_CONF_MIN not in st.session_state:
-        st.session_state[KEY_CONFIG_CONF_MIN] = CONF_MIN_DEFAULT
-    if KEY_CONFIG_IMGSZ not in st.session_state:
-        st.session_state[KEY_CONFIG_IMGSZ] = IMGSZ_DEFAULT
-    if KEY_CONFIG_FRAME_SKIP not in st.session_state:
-        st.session_state[KEY_CONFIG_FRAME_SKIP] = FRAME_SKIP_DEFAULT
-    return {
-        "conf_min": st.session_state[KEY_CONFIG_CONF_MIN],
-        "imgsz": st.session_state[KEY_CONFIG_IMGSZ],
-        "frame_skip": max(1, st.session_state[KEY_CONFIG_FRAME_SKIP]),
-    }
+def set_shared_target(target: str, all_tools: list[str], wrong_tools: list[str] | None = None) -> None:
+    with _shared_lock:
+        _shared_target_tool[0] = target
+        _shared_all_tools.clear()
+        _shared_all_tools.extend(all_tools)
+        _shared_wrong_tools.clear()
+        if wrong_tools:
+            _shared_wrong_tools.extend(wrong_tools)
 
 
-def init_session_state() -> None:
-    init_state()
-    defaults = {
-        KEY_PREOP_SMOOTHER: lambda: ToolPresenceSmoother(window_size=SMOOTH_WINDOW_SIZE),
-        KEY_PREOP_STABLE_START: lambda: None,
-        KEY_ALERTS_LOG: list,
-        KEY_LAST_DETECTIONS: list,
-        KEY_LAST_COUNTS: dict,
-        KEY_FRAME_INDEX: lambda: 0,
-        KEY_NAV: lambda: "Setup",
-        KEY_VIDEO_SOURCE: lambda: "Live Webcam",
-        KEY_UPLOADED_FILE: lambda: None,
-        KEY_STREAK_SECONDS: lambda: 0.0,
-        KEY_STREAK_BEST: lambda: 0.0,
-        KEY_SESSION_START: lambda: None,
-        KEY_HAND_STABILITY: list,
-        KEY_DEMO_MODE: lambda: False,
-        KEY_DEMO_TICK: lambda: 0,
-    }
-    for key, factory in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = factory()
+def get_shared_target() -> tuple[str, list[str], list[str]]:
+    with _shared_lock:
+        return _shared_target_tool[0], list(_shared_all_tools), list(_shared_wrong_tools)
 
 
-def norm_tool(name: str) -> str:
-    return (name or "").strip().lower().replace(" ", "_")
+# ──────────────────────────────────────────────
+# YOLO model (loaded once at module level)
+# ──────────────────────────────────────────────
+
+_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "best.pt")
+
+if YOLO is not None and os.path.isfile(_MODEL_PATH):
+    _yolo_model = YOLO(_MODEL_PATH)
+else:
+    _yolo_model = None
+
+_debug_detections: list[str] = []
 
 
-def counts_for_recipe(counts_norm: dict[str, int], required_tools: list[dict]) -> dict[str, int]:
-    return {r["tool"]: counts_norm.get(norm_tool(r["tool"]), 0) for r in required_tools if r.get("tool")}
+def _set_debug_detections(names: list[str]) -> None:
+    with _shared_lock:
+        _debug_detections.clear()
+        _debug_detections.extend(names)
 
 
-def open_camera() -> cv2.VideoCapture | None:
-    for api in ((cv2.CAP_DSHOW, cv2.CAP_ANY) if hasattr(cv2, "CAP_DSHOW") else (cv2.CAP_ANY,)):
-        try:
-            cap = cv2.VideoCapture(0, api)
-            if cap is not None and cap.isOpened():
-                return cap
-            if cap is not None:
-                cap.release()
-        except Exception:
-            pass
-    return None
+def _get_debug_detections() -> list[str]:
+    with _shared_lock:
+        return list(_debug_detections)
 
 
-def get_video_capture() -> cv2.VideoCapture | None:
-    """Return a VideoCapture. All sources are cached in session_state so video
-    files advance frame-by-frame across reruns rather than restarting."""
-    source = st.session_state.get(KEY_VIDEO_SOURCE, "Live Webcam")
+# ──────────────────────────────────────────────
+# Live API frame capture (1 fps)
+# ──────────────────────────────────────────────
 
-    existing = st.session_state.get(KEY_CAMERA)
-    if existing is not None:
-        try:
-            if existing.isOpened():
-                return existing
-        except Exception:
-            pass
-        st.session_state[KEY_CAMERA] = None
-
-    cap = None
-    if source == "Live Webcam":
-        cap = open_camera()
-    elif source == "Upload Video":
-        data = st.session_state.get(KEY_UPLOADED_FILE)
-        if data is None:
-            return None
-        tmp_path = st.session_state.get("_upload_tmp_path")
-        if tmp_path is None or not Path(tmp_path).exists():
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-            tmp.write(data)
-            tmp.flush()
-            tmp_path = tmp.name
-            st.session_state["_upload_tmp_path"] = tmp_path
-        cap = cv2.VideoCapture(tmp_path)
-    elif source == "Sample Video":
-        p = Path(SAMPLE_VIDEO_PATH)
-        if not p.exists():
-            return None
-        cap = cv2.VideoCapture(str(p))
-
-    if cap is not None and cap.isOpened():
-        st.session_state[KEY_CAMERA] = cap
-        return cap
-    if cap is not None:
-        cap.release()
-    return None
+_LIVE_FRAME_INTERVAL = 30  # ~1fps at 30fps
+_live_frame_counter: list[int] = [0]
 
 
-@st.cache_resource
-def cached_model():
-    return get_model(MODEL_PATH)
+# ──────────────────────────────────────────────
+# Proctor log helper
+# ──────────────────────────────────────────────
+
+def log_proctor(entry_type: str, text: str) -> None:
+    st.session_state.proctor_log.insert(0, {
+        "type": entry_type,
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "text": text,
+    })
+    st.session_state.proctor_log = st.session_state.proctor_log[:30]
 
 
-def generate_demo_detections(tick: int, required_tools: list[dict], mode: str) -> list[dict]:
-    """
-    Generate synthetic detections for demo mode.
-    In SETUP (PRE_OP): progressively reveal tools over ticks so the checklist fills up.
-    In PRACTICE (INTRA_OP): show most tools with occasional random drops to trigger rules.
-    """
-    h, w = 480, 640
-    all_tools = [r["tool"] for r in required_tools]
-    if not all_tools:
-        return []
+# ──────────────────────────────────────────────
+# Proctoring logic (shared by both modes)
+# ──────────────────────────────────────────────
 
-    if mode == "PRE_OP":
-        # Reveal one more tool each tick (~1.5s) until all are shown
-        n_visible = min(len(all_tools), tick + 1)
-        visible = all_tools[:n_visible]
-    else:
-        # Show all tools but randomly drop 0-2 to create occasional alerts
-        drop = random.randint(0, min(2, len(all_tools) - 1)) if tick % 5 == 0 else 0
-        visible = all_tools if drop == 0 else random.sample(all_tools, max(1, len(all_tools) - drop))
+def process_detection(detected: str, steps: list[dict], current_idx: int) -> int:
+    """Run a single detected tool through brain.check_student_action.
+    Returns the (possibly advanced) current_idx."""
+    if current_idx >= len(steps):
+        return current_idx
 
-    detections = []
-    for i, tool in enumerate(visible):
-        row = i // 4
-        col = i % 4
-        x1 = 30 + col * 150
-        y1 = 30 + row * 120
-        x2 = x1 + 120
-        y2 = y1 + 90
-        detections.append({
-            "name": tool,
-            "conf": round(random.uniform(0.70, 0.98), 2),
-            "xyxy": [float(x1), float(y1), float(x2), float(y2)],
-        })
-    return detections
-
-
-def render_demo_frame(detections: list[dict]) -> np.ndarray:
-    """Render a dark placeholder frame with synthetic bounding boxes for demo mode."""
-    frame = np.full((480, 640, 3), (23, 17, 10), dtype=np.uint8)
-    cv2.putText(frame, "DEMO MODE", (220, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 229, 255), 2)
-    cv2.putText(frame, "Simulated detections - no camera needed", (120, 460),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (136, 153, 170), 1)
-    return draw_detections(frame, detections)
-
-
-def display_frame(frame_bgr: np.ndarray) -> None:
-    """Embed a BGR frame as a base64 JPEG data-URI, bypassing Streamlit media storage."""
-    _, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    b64 = base64.b64encode(buf.tobytes()).decode("ascii")
-    st.markdown(
-        f'<img src="data:image/jpeg;base64,{b64}" style="width:100%;border-radius:8px;">',
-        unsafe_allow_html=True,
+    current_step = steps[current_idx]
+    result = check_student_action(
+        detected_tools=[detected],
+        current_target_tool=current_step["target_tool_key"],
+        current_instruction=current_step["instruction"],
+        current_safety_tip=current_step.get("critical_safety_tip", ""),
     )
 
+    ts = datetime.now().strftime("%H:%M:%S")
 
-# =============================================================================
-# Recipe & model
-# =============================================================================
+    if isinstance(result, ActionSuccess):
+        st.session_state.completed_steps.add(current_idx)
+        st.session_state.latest_rationale = result.message
+        log_proctor("correct", f"✓ {result.tool} — {result.message}")
+        st.toast(f"✅ {result.tool} — correct!", icon="🎯")
+        st.session_state.action_log.append({
+            "time": ts, "type": "match", "tool": result.tool,
+            "detail": f"Correctly identified at step {current_idx + 1}",
+        })
+        st.session_state.event_log.append({
+            "time": ts, "type": "detection_match", "tool": result.tool,
+            "detail": f"Correctly identified at step {current_idx + 1}",
+        })
+
+        st.session_state.current_step_index = current_idx + 1
+        st.session_state.step_start_time = time.time()
+        current_idx = st.session_state.current_step_index
+
+        if current_idx >= len(steps):
+            st.session_state.app_state = "COMPLETE"
+            log_proctor("correct", "All training steps completed successfully.")
+            st.toast("🏆 Module complete!", icon="🏆")
+    else:
+        log_proctor("correction", f"✗ Picked {result.wrong_tool} → {result.message}")
+        st.toast(f"❌ Wrong tool: {result.wrong_tool}", icon="⚠️")
+        st.session_state.action_log.append({
+            "time": ts, "type": "wrong_tool", "tool": result.wrong_tool,
+            "detail": f"Expected {result.target_tool}, got {result.wrong_tool}",
+        })
+        st.session_state.event_log.append({
+            "time": ts, "type": "wrong_tool", "tool": result.wrong_tool,
+            "detail": f"Expected {result.target_tool}, got {result.wrong_tool}",
+        })
+
+    return current_idx
 
 
-def load_recipe_safe() -> dict:
-    try:
-        return load_recipe(RECIPE_PATH)
-    except Exception:
-        return {"preop_required": [], "params": {"conf_min": CONF_MIN_DEFAULT, "stable_seconds": 2.0}, "intraop_rules": []}
+# ──────────────────────────────────────────────
+# WebRTC video callback
+# ──────────────────────────────────────────────
+
+_CYAN = (0, 229, 255)
+_GREEN = (0, 230, 118)
+_RED = (68, 23, 255)
+_DARK = (0, 0, 0)
+_YELLOW = (0, 171, 255)
+
+_YOLO_CONF = 0.40
 
 
-recipe = load_recipe_safe()
-preop_required = recipe.get("preop_required", [])
-params = recipe.get("params", {})
-stable_seconds = float(params.get("stable_seconds", 2.0))
-intraop_rules = recipe.get("intraop_rules", [])
+def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+    img = frame.to_ndarray(format="bgr24")
+    h, w, _ = img.shape
 
-# =============================================================================
-# Session state
-# =============================================================================
+    target, _, _ = get_shared_target()
 
-init_session_state()
+    if target:
+        cv2.putText(img, f"TARGET: {target}", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, _CYAN, 2)
+    else:
+        cv2.putText(img, "AWAITING TARGET", (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, _YELLOW, 2)
 
-# =============================================================================
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    cv2.putText(img, ts, (15, h - 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, _CYAN, 1)
+
+    if _yolo_model is None:
+        cv2.putText(img, "YOLO NOT LOADED", (15, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, _RED, 2)
+        _set_debug_detections([])
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    results = _yolo_model(img, conf=_YOLO_CONF, verbose=False)
+
+    detected_names: list[str] = []
+
+    if results and results[0].boxes is not None and len(results[0].boxes):
+        boxes = results[0].boxes
+        names_map = results[0].names
+
+        for box in boxes:
+            cls_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            class_name = names_map[cls_id]
+            detected_names.append(class_name)
+
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            is_match = class_name == target
+            color = _GREEN if is_match else _CYAN
+
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+
+            bk = 15
+            for (bx, by, dx, dy) in [
+                (x1, y1, 1, 1), (x2, y1, -1, 1),
+                (x1, y2, 1, -1), (x2, y2, -1, -1),
+            ]:
+                cv2.line(img, (bx, by), (bx + dx * bk, by), color, 3)
+                cv2.line(img, (bx, by), (bx, by + dy * bk), color, 3)
+
+            label = f"{class_name} {conf:.2f}"
+            (tw, th_t), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            cv2.rectangle(img, (x1, y1 - th_t - 10), (x1 + tw + 8, y1), color, -1)
+            cv2.putText(img, label, (x1 + 4, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, _DARK, 2)
+
+            if is_match:
+                cv2.putText(img, "MATCH", (x1 + 4, y2 + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, _GREEN, 2)
+
+    _set_debug_detections(detected_names)
+
+    pushed: set[str] = set()
+    for name in detected_names:
+        if name not in pushed:
+            pushed.add(name)
+            try:
+                tool_queue.put_nowait(name)
+            except queue.Full:
+                pass
+
+    n_det = len(detected_names)
+    det_color = _GREEN if n_det > 0 else _YELLOW
+    cv2.putText(img, f"Detections: {n_det}", (15, 58),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, det_color, 1)
+
+    # ── Live API: send 1 frame/sec to Clarity ──
+    _live_frame_counter[0] += 1
+    if _live_frame_counter[0] % _LIVE_FRAME_INTERVAL == 0:
+        proctor = get_live_proctor()
+        if proctor is not None and proctor.active:
+            small = cv2.resize(img, (768, 768))
+            _, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 50])
+            proctor.send_frame(buf.tobytes())
+
+    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+
+# ──────────────────────────────────────────────
 # Sidebar
-# =============================================================================
-
-NAV_ITEMS = ["Setup", "Practice", "Report"]
-MODE_MAP = {"Setup": "PRE_OP", "Practice": "INTRA_OP", "Report": "POST_OP"}
+# ──────────────────────────────────────────────
 
 with st.sidebar:
     st.markdown(
         '<div class="dashboard-header">'
-        "<h1>🧪 MedLab Coach</h1>"
-        "<p>AI Lab Coach • Skill Assessment</p>"
+        "<h1>SurgiPath</h1>"
+        "<p>AI-Guided Surgical Training</p>"
         "</div>",
         unsafe_allow_html=True,
     )
-    mode = get_mode()
+
+    state = st.session_state.app_state
+
     badge_map = {
-        "PRE_OP": ("● Setup", "status-idle"),
-        "INTRA_OP": ("● Practicing", "status-active"),
-        "POST_OP": ("● Report Ready", "status-ready"),
+        "IDLE": ("● Awaiting Module", "status-idle"),
+        "TRAINING": ("● Training Active", "status-active"),
+        "COMPLETE": ("● Module Complete", "status-ready"),
     }
-    badge_text, badge_cls = badge_map.get(mode, badge_map["PRE_OP"])
-    st.markdown(f'<span class="status-badge {badge_cls}">{badge_text}</span>', unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.markdown("### Video Source")
-    source = st.radio(
-        "Feed",
-        ["Live Webcam", "Upload Video", "Sample Video"],
-        index=["Live Webcam", "Upload Video", "Sample Video"].index(
-            st.session_state.get(KEY_VIDEO_SOURCE, "Live Webcam")
-        ),
-        label_visibility="collapsed",
-        key="source_radio",
+    badge_text, badge_cls = badge_map.get(state, badge_map["IDLE"])
+    st.markdown(
+        f'<span class="status-badge {badge_cls}">{badge_text}</span>',
+        unsafe_allow_html=True,
     )
-    st.session_state[KEY_VIDEO_SOURCE] = source
-    if source == "Upload Video":
-        uploaded = st.file_uploader("Upload a lab recording", type=["mp4", "avi", "mov"], key="vid_upload")
-        if uploaded is not None:
-            st.session_state[KEY_UPLOADED_FILE] = uploaded.read()
 
-    st.markdown("---")
-    demo = st.toggle("Demo Mode (no camera needed)", value=st.session_state.get(KEY_DEMO_MODE, False), key="demo_toggle")
-    st.session_state[KEY_DEMO_MODE] = demo
-    if demo:
-        st.caption("Synthetic detections — walk through the full flow without tools or camera.")
-
-    st.markdown("---")
-    st.markdown("### Navigation")
-    nav = st.radio(
-        "Section",
-        NAV_ITEMS,
-        index=NAV_ITEMS.index(st.session_state[KEY_NAV]) if st.session_state[KEY_NAV] in NAV_ITEMS else 0,
-        label_visibility="collapsed",
-        key="nav_radio",
-    )
-    st.session_state[KEY_NAV] = nav
-
-    st.markdown("---")
-    with st.expander("Settings", expanded=False):
-        st.session_state[KEY_CONFIG_CONF_MIN] = st.slider(
-            "Confidence", 0.2, 0.9,
-            st.session_state.get(KEY_CONFIG_CONF_MIN, CONF_MIN_DEFAULT), 0.05,
+    # ── Mastery Score (visible during training / complete) ──
+    if state in ("TRAINING", "COMPLETE"):
+        score = st.session_state.mastery_score
+        if score > 80:
+            score_color = "#34C759"
+        elif score >= 50:
+            score_color = "#FF9500"
+        else:
+            score_color = "#FF3B30"
+        n_skips = len(st.session_state.skipped_steps)
+        delta_str = f"-{n_skips * SKIP_PENALTY} (skips)" if n_skips else "No deductions"
+        st.markdown(
+            f'<div style="text-align:center;padding:0.8rem 0 0.3rem;">'
+            f'<div style="font-size:0.65rem;color:#666;letter-spacing:0.8px;'
+            f'text-transform:uppercase;font-weight:400;">Mastery Score</div>'
+            f'<div style="font-size:2.2rem;font-weight:600;color:{score_color};'
+            f'margin:0.15rem 0;">{score}</div>'
+            f'<div style="font-size:0.65rem;color:#666;font-weight:300;">'
+            f'{delta_str}</div></div>',
+            unsafe_allow_html=True,
         )
-        with st.expander("Advanced / Dev", expanded=False):
-            imgsz_opts = [320, 416, 640, 832]
-            cur = st.session_state.get(KEY_CONFIG_IMGSZ, IMGSZ_DEFAULT)
-            idx = imgsz_opts.index(cur) if cur in imgsz_opts else 2
-            st.session_state[KEY_CONFIG_IMGSZ] = st.selectbox("Inference size", imgsz_opts, index=idx)
-            st.session_state[KEY_CONFIG_FRAME_SKIP] = st.number_input(
-                "Frame skip", min_value=1, max_value=10, value=FRAME_SKIP_DEFAULT, step=1,
-            )
-            cfg = get_config()
-            st.caption(f"conf={cfg['conf_min']} imgsz={cfg['imgsz']} skip={cfg['frame_skip']}")
 
-# =============================================================================
-# Main header
-# =============================================================================
+    st.markdown("---")
+
+    st.session_state.demo_mode = st.toggle(
+        "🧪 Demo Mode (no camera)",
+        value=st.session_state.demo_mode,
+        help="Use a virtual instrument tray instead of the live camera feed.",
+    )
+    if st.session_state.demo_mode:
+        st.caption("Click instruments from the virtual tray to simulate detections.")
+
+    st.markdown("---")
+    st.markdown("### Enter Surgery / Procedure Name")
+
+    procedure_input = st.text_input(
+        "Procedure",
+        placeholder="e.g. Laparoscopic Cholecystectomy, Central Line Insertion…",
+        label_visibility="collapsed",
+        disabled=state == "TRAINING",
+    )
+
+    if state == "IDLE":
+        init_clicked = st.button(
+            "🧠  Start Training",
+            use_container_width=True,
+            disabled=not procedure_input.strip(),
+        )
+
+        if init_clicked and procedure_input.strip():
+            with st.status("Clarity is reasoning…", expanded=True) as status:
+                st.write(f"**Procedure:** {procedure_input.strip()}")
+                st.write("Analyzing WHO Surgical Safety protocols…")
+
+                result = generate_dynamic_syllabus(procedure_input.strip())
+
+                if isinstance(result, SyllabusError):
+                    status.update(label="Could not generate syllabus", state="error")
+                    st.error(result.error)
+                    st.stop()
+
+                syllabus = result
+                st.write(f"Generated **{len(syllabus.steps)}** training steps:")
+                for step in syllabus.steps:
+                    st.write(
+                        f"  • **{step.step_name}** → `{step.target_tool_key}` "
+                        f"({step.time_limit_seconds}s)"
+                    )
+                status.update(label="Syllabus ready!", state="complete")
+
+            st.session_state.module_name = procedure_input.strip()
+            st.session_state.syllabus = syllabus.model_dump()
+            st.session_state.current_step_index = 0
+            st.session_state.completed_steps = set()
+            st.session_state.latest_rationale = ""
+            st.session_state.proctor_log = []
+            st.session_state.training_start_time = datetime.now().isoformat()
+            st.session_state.mastery_score = 100
+            st.session_state.skipped_steps = []
+            st.session_state.session_report = ""
+            st.session_state.action_log = []
+            st.session_state.event_log = []
+            st.session_state.clarity_feedback = []
+            st.session_state.step_start_time = time.time()
+            st.session_state.final_critique = ""
+            st.session_state.learning_resources = ""
+            _live_frame_counter[0] = 0
+            proctor = LiveProctor()
+            set_live_proctor(proctor)
+            proctor.start(procedure_input.strip())
+            st.session_state.app_state = "TRAINING"
+            st.rerun()
+
+    elif state in ("TRAINING", "COMPLETE"):
+        if st.button("🔄  Reset Module", use_container_width=True):
+            st.session_state.app_state = "IDLE"
+            st.session_state.syllabus = None
+            st.session_state.completed_steps = set()
+            st.session_state.current_step_index = 0
+            st.session_state.latest_rationale = ""
+            st.session_state.proctor_log = []
+            st.session_state.demo_injection = None
+            st.session_state.mastery_score = 100
+            st.session_state.skipped_steps = []
+            st.session_state.session_report = ""
+            st.session_state.action_log = []
+            st.session_state.event_log = []
+            st.session_state.clarity_feedback = []
+            st.session_state.step_start_time = 0.0
+            st.session_state.final_critique = ""
+            st.session_state.learning_resources = ""
+            _live_frame_counter[0] = 0
+            old_proctor = get_live_proctor()
+            if old_proctor is not None:
+                old_proctor.stop()
+            set_live_proctor(None)
+            set_shared_target("", [], [])
+            st.rerun()
+
+    # ── Dynamic syllabus in sidebar ──
+    if state in ("TRAINING", "COMPLETE") and st.session_state.syllabus:
+        syllabus_data = st.session_state.syllabus
+        n_steps = len(syllabus_data["steps"])
+        n_done = len(st.session_state.completed_steps)
+        pct = int(n_done / n_steps * 100) if n_steps else 0
+
+        st.markdown("---")
+        st.markdown(
+            f'<div class="progress-ring">'
+            f'<div class="pct">{pct}%</div>'
+            f'<div class="pct-label">Steps Complete ({n_done}/{n_steps})</div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("### Syllabus")
+        current_idx_sidebar = st.session_state.current_step_index
+        _skipped_indices = {s["step_idx"] for s in st.session_state.skipped_steps}
+        for i, step in enumerate(syllabus_data["steps"]):
+            _tl_s = step.get("time_limit_seconds", 60)
+            if i in st.session_state.completed_steps and i in _skipped_indices:
+                st.markdown(
+                    f'<span style="color:#FF3B30;font-weight:700;">✕</span> '
+                    f'<del style="color:#9E9E9E;">{step["step_name"]}</del> '
+                    f'— <code>{step["target_tool_key"]}</code>',
+                    unsafe_allow_html=True,
+                )
+            elif i in st.session_state.completed_steps:
+                st.markdown(
+                    f'<span style="color:#34C759;font-weight:700;">✓</span> '
+                    f'{step["step_name"]} '
+                    f'— <code>{step["target_tool_key"]}</code>',
+                    unsafe_allow_html=True,
+                )
+            elif i == current_idx_sidebar:
+                st.markdown(
+                    f'<span style="color:#007AFF;font-weight:700;">▶</span> '
+                    f'<strong>{step["step_name"]}</strong> '
+                    f'— <code>{step["target_tool_key"]}</code> '
+                    f'<span style="color:#9E9E9E;">{_tl_s}s</span>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<span style="color:#666;">○</span> '
+                    f'<span style="color:#666;">{step["step_name"]} '
+                    f'— <code>{step["target_tool_key"]}</code> ({_tl_s}s)</span>',
+                    unsafe_allow_html=True,
+                )
+
+        mode_label = "Demo" if st.session_state.demo_mode else "Camera"
+        st.markdown("### System")
+        m1, m2 = st.columns(2)
+        with m1:
+            st.markdown(
+                f'<div class="metric-card">'
+                f'<div class="value">{mode_label}</div>'
+                f'<div class="label">Mode</div>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        with m2:
+            det_label = "Live" if not st.session_state.demo_mode else "Click"
+            st.markdown(
+                f'<div class="metric-card">'
+                f'<div class="value">{det_label}</div>'
+                f'<div class="label">Detection</div>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # ── Clarity Live Feed ──
+        st.markdown("---")
+        n_feedback = len(st.session_state.clarity_feedback)
+        n_events = len(st.session_state.event_log)
+
+        proctor = get_live_proctor()
+        if state == "TRAINING" and proctor is not None and proctor.active:
+            st.markdown(
+                '<div style="padding:0.5rem 0.7rem;background:#1E1E1E;'
+                'border:1px solid rgba(0,122,255,0.3);border-radius:6px;">'
+                '<span style="color:#007AFF;font-weight:500;">●</span> '
+                '<span style="color:#007AFF;font-size:0.8rem;font-weight:500;'
+                'letter-spacing:0.5px;">CLARITY LIVE</span><br>'
+                f'<span style="color:#666;font-size:0.7rem;font-weight:300;">'
+                f'{n_feedback} observations &middot; {n_events} events</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        elif state == "TRAINING":
+            st.markdown(
+                '<div style="padding:0.5rem 0.7rem;background:#1E1E1E;'
+                'border:1px solid #333;border-radius:6px;">'
+                '<span style="color:#9E9E9E;font-weight:500;">○</span> '
+                '<span style="color:#9E9E9E;font-size:0.8rem;font-weight:500;'
+                'letter-spacing:0.5px;">CLARITY STANDBY</span><br>'
+                f'<span style="color:#666;font-size:0.7rem;font-weight:300;">'
+                f'{n_events} events logged</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        elif state == "COMPLETE":
+            st.markdown(
+                '<div style="padding:0.5rem 0.7rem;background:#1E1E1E;'
+                'border:1px solid #333;border-radius:6px;">'
+                '<span style="color:#007AFF;font-weight:500;">■</span> '
+                '<span style="color:#007AFF;font-size:0.8rem;font-weight:500;'
+                'letter-spacing:0.5px;">SESSION CLOSED</span><br>'
+                f'<span style="color:#666;font-size:0.7rem;font-weight:300;">'
+                f'{n_feedback} observations &middot; {n_events} events &middot; '
+                f'Ready for grading</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── CLINICAL NARRATIVE — Clarity observations ──
+        st.markdown(
+            '<div style="font-size:0.65rem;font-weight:500;color:#666;'
+            'letter-spacing:0.8px;text-transform:uppercase;'
+            'margin-bottom:0.4rem;">Clinical Narrative</div>',
+            unsafe_allow_html=True,
+        )
+        feedback = st.session_state.clarity_feedback
+
+        if feedback:
+            narrative_html = (
+                '<div style="max-height:240px;overflow-y:auto;'
+                'background:#1E1E1E;border:1px solid #333;border-left:3px solid #007AFF;'
+                'border-radius:6px;padding:0.5rem 0.7rem;">'
+            )
+            for entry in reversed(feedback[-15:]):
+                narrative_html += (
+                    f'<div style="padding:3px 0;border-bottom:1px solid #2A2A2A;'
+                    f'font-family:\'Crimson Pro\',Georgia,serif;font-size:0.78rem;'
+                    f'line-height:1.5;color:#9E9E9E;">{entry}</div>'
+                )
+            narrative_html += '</div>'
+            st.markdown(narrative_html, unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div style="background:#1E1E1E;border:1px solid #333;'
+                'border-left:3px solid #007AFF;border-radius:6px;'
+                'padding:0.6rem 0.7rem;font-family:\'Consolas\',monospace;'
+                'font-size:0.68rem;color:#666;">'
+                'Clarity will provide observations when active.</div>',
+                unsafe_allow_html=True,
+            )
+        st.caption(f"Observations: {n_feedback} | Events: {n_events}")
+
+        # ── Sidebar footer ──
+        st.markdown("---")
+        st.markdown(
+            "*SurgiPath v1.0 | Developed by Kushal and An | HackSLU 2026*"
+        )
+
+
+# ──────────────────────────────────────────────
+# Main area — header
+# ──────────────────────────────────────────────
 
 st.markdown(
     '<div class="dashboard-header">'
-    "<h1>MEDLAB COACH AI</h1>"
-    "<p>AI-Guided Skill Assessment for Medical Training Labs</p>"
+    "<h1>SurgiPath</h1>"
+    "<p>AI-Guided Training &mdash; Clarity AI &middot; Gemini Live &middot; YOLOv11</p>"
     "</div>",
     unsafe_allow_html=True,
 )
 
-# =============================================================================
-# Video feed — fragment for fast video, autorefresh for checklist sync
-# =============================================================================
-#
-# Design: a single stable @st.fragment(run_every=1s) grabs frames and renders
-# them as base64 data-URIs (bypasses Streamlit media storage → no missing-file
-# errors). A slower st_autorefresh(4s) triggers full-page reruns so the Setup
-# checklist / Practice alerts pick up the latest smoother data written by the
-# fragment.
 
-is_demo = st.session_state.get(KEY_DEMO_MODE, False)
-run_feed = nav in ("Setup", "Practice") and mode in ("PRE_OP", "INTRA_OP")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# IDLE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Release camera when leaving feed views or switching to demo
-if (not run_feed or is_demo) and KEY_CAMERA in st.session_state and st.session_state[KEY_CAMERA] is not None:
-    try:
-        st.session_state[KEY_CAMERA].release()
-    except Exception:
-        pass
-    st.session_state[KEY_CAMERA] = None
-
-# Periodic full rerun keeps the checklist in sync with smoother data
-if run_feed:
-    st_autorefresh(interval=4000, limit=None, key="checklist_sync")
-
-
-@st.fragment(run_every=timedelta(seconds=1.0))
-def video_feed_fragment():
-    """High-frequency video feed using base64 images (no media-file storage)."""
-    current_nav = st.session_state.get(KEY_NAV, "")
-    if current_nav not in ("Setup", "Practice"):
-        return
-    current_mode = get_mode()
-    if current_mode not in ("PRE_OP", "INTRA_OP"):
-        return
-
-    demo = st.session_state.get(KEY_DEMO_MODE, False)
-
-    if demo:
-        tick = st.session_state.get(KEY_DEMO_TICK, 0)
-        st.session_state[KEY_DEMO_TICK] = tick + 1
-        detections = generate_demo_detections(tick, preop_required, current_mode)
-        counts_norm = {norm_tool(k): v for k, v in count_tools(detections).items()}
-        st.session_state[KEY_LAST_DETECTIONS] = detections
-        st.session_state[KEY_LAST_COUNTS] = counts_norm
-        st.session_state[KEY_PREOP_SMOOTHER].update(
-            counts_for_recipe(counts_norm, preop_required), preop_required,
+if st.session_state.app_state == "IDLE":
+    st.markdown("")
+    cols = st.columns([1, 2, 1])
+    with cols[1]:
+        st.markdown(
+            '<div class="dashboard-header" style="text-align:center;padding:3rem 2rem;">'
+            "<h2>Welcome to SurgiPath</h2>"
+            '<p style="font-size:1rem;margin-top:0.8rem;font-weight:300;">'
+            "Type <strong>any</strong> medical or surgical procedure in the "
+            "sidebar and click <strong>Start Training</strong>.<br><br>"
+            "Clarity will reason through the procedure, validate it against "
+            "WHO Surgical Safety protocols, and generate a structured "
+            "training syllabus.<br><br>"
+            "Use <strong>Demo Mode</strong> to practise without a camera, "
+            "or connect a webcam for real-time Clarity analysis."
+            "</p></div>",
+            unsafe_allow_html=True,
         )
-        display_frame(render_demo_frame(detections))
-    else:
-        cap = get_video_capture()
-        if cap is None:
-            src = st.session_state.get(KEY_VIDEO_SOURCE, "Live Webcam")
-            if src == "Live Webcam":
-                st.warning("Camera not available. Connect a webcam and refresh, or enable Demo Mode.")
-            elif src == "Upload Video":
-                st.info("Upload a video file using the sidebar to begin.")
-            else:
-                st.info(f"Sample video not found at {SAMPLE_VIDEO_PATH}.")
-            return
-        try:
-            model = cached_model()
-        except FileNotFoundError:
-            st.error(f"Model not found: {MODEL_PATH}")
-            return
-        cfg = get_config()
-        smoother = st.session_state[KEY_PREOP_SMOOTHER]
-        last_frame = None
-        for _ in range(max(cfg["frame_skip"], 2)):
-            ret, f = cap.read()
-            if ret:
-                last_frame = f
-        if last_frame is not None:
-            detections = infer_tools(
-                last_frame, conf=cfg["conf_min"],
-                imgsz=cfg["imgsz"], model=model,
-            )
-            counts_norm = {norm_tool(k): v for k, v in count_tools(detections).items()}
-            st.session_state[KEY_LAST_DETECTIONS] = detections
-            st.session_state[KEY_LAST_COUNTS] = counts_norm
-            smoother.update(
-                counts_for_recipe(counts_norm, preop_required), preop_required,
-            )
-            display_frame(draw_detections(last_frame, detections))
-        else:
-            try:
-                cap.release()
-            except Exception:
-                pass
-            st.session_state[KEY_CAMERA] = None
-            st.warning("No frames — camera may have disconnected.")
 
 
-# Always call so the fragment ID stays stable across full reruns
-video_feed_fragment()
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TRAINING / COMPLETE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# =============================================================================
-# SETUP tab (was Pre-Op)
-# =============================================================================
+elif st.session_state.app_state in ("TRAINING", "COMPLETE"):
+    syllabus_data = st.session_state.syllabus
+    steps = syllabus_data["steps"]
+    n_steps = len(steps)
+    current_idx = st.session_state.current_step_index
+    is_demo = st.session_state.demo_mode
 
-if nav == "Setup":
-    st.subheader("Lab Setup Checklist")
-    st.caption("Ensure all required tools are visible to the camera before starting your lab session.")
-    smoother = st.session_state[KEY_PREOP_SMOOTHER]
-    readiness = smoother.readiness_counts(preop_required) if preop_required else {}
-    all_present = smoother.all_present(preop_required)
-    now_ts = time.time()
+    # ── 1a. Process demo injection (set by tray button on previous rerun) ──
+    demo_detected = st.session_state.pop("demo_injection", None)
+    if demo_detected is not None:
+        current_idx = process_detection(demo_detected, steps, current_idx)
 
-    if all_present:
-        if st.session_state[KEY_PREOP_STABLE_START] is None:
-            st.session_state[KEY_PREOP_STABLE_START] = now_ts
-    else:
-        st.session_state[KEY_PREOP_STABLE_START] = None
+    # ── 1b. Process manual override (set by skip button on previous rerun) ──
+    skip_req = st.session_state.pop("_skip_requested", None)
+    if skip_req is not None and current_idx < n_steps:
+        skipped_tool = steps[current_idx]["target_tool_key"]
+        skipped_instruction = steps[current_idx]["instruction"]
+        skip_reason = skip_req.get("reason", "")
 
-    stable_start = st.session_state[KEY_PREOP_STABLE_START]
-    stable_elapsed = (now_ts - stable_start) if stable_start else 0
-    # In demo mode, skip the stable_seconds wait — pass immediately when all tools detected
-    effective_stable = 0.0 if st.session_state.get(KEY_DEMO_MODE, False) else stable_seconds
-    checklist_pass = all_present and (stable_elapsed >= effective_stable)
+        warning = generate_skip_warning(
+            target_tool=skipped_tool,
+            instruction=skipped_instruction,
+            reason=skip_reason,
+        )
 
-    n_required = len(preop_required)
-    n_ok = sum(1 for r in preop_required if readiness.get(r["tool"], (0, False))[1])
-    readiness_pct = int(100 * n_ok / n_required) if n_required else 100
-    st.progress(readiness_pct / 100.0)
-    status_text = (
-        "All tools detected — ready!" if checklist_pass
-        else "Almost there — hold steady..." if all_present
-        else "Some tools still missing"
-    )
-    st.caption(f"Readiness: {n_ok}/{n_required} tools ({readiness_pct}%) — {status_text}")
-
-    if preop_required:
-        header = ("Tool", "Required", "Seen (window)", "Status")
-        rows = []
-        for r in preop_required:
-            tool = r["tool"]
-            detected, is_ok = readiness.get(tool, (0, False))
-            rows.append((str(tool), str(r.get("min_count", 1)), str(detected), "Ready" if is_ok else "Missing"))
-        st.table([header] + rows)
-
-    if checklist_pass:
-        if st.button("Begin Lab Session", type="primary", width="stretch"):
-            set_mode("INTRA_OP")
-            st.session_state[KEY_NAV] = "Practice"
-            st.session_state[KEY_SESSION_START] = datetime.now().isoformat()
-            st.session_state[KEY_STREAK_SECONDS] = 0.0
-            st.session_state[KEY_STREAK_BEST] = 0.0
-            st.session_state[KEY_ALERTS_LOG] = []
-            log_event("STATE_CHANGE", {"from": "PRE_OP", "to": "INTRA_OP"}, mode="INTRA_OP")
-            log_event("CHECKLIST_STATUS", {"status": "PASS", "readiness_pct": readiness_pct}, mode="INTRA_OP")
-            st.rerun()
-    else:
-        st.button("Begin Lab Session", disabled=True, width="stretch", help="All tools must be detected and held steady.")
-
-# =============================================================================
-# PRACTICE tab (was Intra-Op)
-# =============================================================================
-
-if nav == "Practice":
-    st.subheader("Practice Session")
-    phase = st.selectbox(
-        "Current Exercise",
-        PHASES,
-        index=PHASES.index(get_phase()) if get_phase() in PHASES else 0,
-        format_func=lambda p: PHASE_LABELS.get(p, p),
-        key="phase_select",
-    )
-    prev_phase = get_phase()
-    set_phase(phase)
-    if phase != prev_phase:
-        log_event("PHASE_CHANGE", {"phase": phase}, mode="INTRA_OP", phase=phase)
-
-    counts = st.session_state.get(KEY_LAST_COUNTS, {})
-    dt_seconds = (FEED_LOOP_FRAMES * 0.033) / max(1, get_config()["frame_skip"])
-    alerts = evaluate_rules(phase, counts, intraop_rules, dt_seconds, st.session_state)
-
-    # Streak logic: consecutive seconds without new alerts
-    if alerts:
-        st.session_state[KEY_STREAK_SECONDS] = 0.0
-    else:
-        st.session_state[KEY_STREAK_SECONDS] = st.session_state.get(KEY_STREAK_SECONDS, 0) + dt_seconds
-    current_streak = st.session_state[KEY_STREAK_SECONDS]
-    if current_streak > st.session_state.get(KEY_STREAK_BEST, 0):
-        st.session_state[KEY_STREAK_BEST] = current_streak
-
-    for a in alerts:
-        st.session_state[KEY_ALERTS_LOG].append({
-            "ts": datetime.now().isoformat(),
-            "phase": a.get("phase", phase),
-            "message": a.get("message", ""),
-            "rule_id": a.get("rule_id", ""),
+        st.session_state.mastery_score = max(
+            0, st.session_state.mastery_score - SKIP_PENALTY
+        )
+        st.session_state.skipped_steps.append({
+            "step_idx": current_idx,
+            "tool": skipped_tool,
+            "reason": skip_reason or "No reason given",
+            "warning": warning,
         })
-        log_event("ALERT", {"rule_id": a.get("rule_id"), "message": a.get("message")}, mode="INTRA_OP", phase=phase)
+        st.session_state.completed_steps.add(current_idx)
+        st.session_state.latest_rationale = f"⚠️ SKIPPED: {warning}"
+        log_proctor(
+            "skip",
+            f"⚠️ Manual override — skipped {skipped_tool} "
+            f"(−{SKIP_PENALTY} pts): {warning}",
+        )
+        st.session_state.action_log.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "type": "override",
+            "tool": skipped_tool,
+            "detail": f"Skipped (−{SKIP_PENALTY} pts): {skip_reason or 'No reason given'}",
+        })
+        st.session_state.event_log.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "type": "override",
+            "tool": skipped_tool,
+            "detail": f"Manual advance — {skip_reason or 'No reason given'}",
+        })
+        st.toast(
+            f"⚠️ Skipped {skipped_tool} — {SKIP_PENALTY} pts deducted",
+            icon="⚠️",
+        )
 
-    # Streak display
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        st.metric("Current Streak", f"{int(current_streak)}s", help="Consecutive seconds without coaching alerts")
-    with col_s2:
-        st.metric("Best Streak", f"{int(st.session_state.get(KEY_STREAK_BEST, 0))}s")
+        st.session_state.current_step_index = current_idx + 1
+        st.session_state.step_start_time = time.time()
+        current_idx = st.session_state.current_step_index
+        if current_idx >= n_steps:
+            st.session_state.app_state = "COMPLETE"
+            log_proctor("correct", "All training steps completed.")
 
-    # Alerts panel
-    alerts_log = st.session_state.get(KEY_ALERTS_LOG, [])[-10:]
-    st.markdown("**Areas for Improvement** (last 10)")
-    if alerts_log:
-        for e in reversed(alerts_log):
-            st.markdown(f"- [{e.get('ts', '')}] **{PHASE_LABELS.get(e.get('phase', ''), e.get('phase', ''))}**: {e.get('message', '')}")
+    # ── 1c. Timer expiry — auto-deduction if time runs out ──
+    if (
+        current_idx < n_steps
+        and st.session_state.app_state == "TRAINING"
+        and st.session_state.step_start_time > 0
+    ):
+        step_time_limit = steps[current_idx].get("time_limit_seconds", 60)
+        elapsed = time.time() - st.session_state.step_start_time
+        if elapsed >= step_time_limit:
+            expired_step = steps[current_idx]
+            expired_tool = expired_step["target_tool_key"]
+
+            st.session_state.mastery_score = max(
+                0, st.session_state.mastery_score - TIMER_PENALTY
+            )
+            st.session_state.completed_steps.add(current_idx)
+            st.session_state.latest_rationale = (
+                f"⏰ TIMEOUT: {expired_step.get('critical_safety_tip', '')}"
+            )
+            st.session_state.skipped_steps.append({
+                "step_idx": current_idx,
+                "tool": expired_tool,
+                "reason": "Timer expired",
+                "warning": f"TIMEOUT: {expired_step.get('critical_safety_tip', '')}",
+            })
+            log_proctor(
+                "timeout",
+                f"⏰ Time expired for {expired_step['step_name']} "
+                f"(−{TIMER_PENALTY} pts)",
+            )
+            st.session_state.clarity_feedback.append(
+                f"[Clarity] TIMEOUT: {expired_step['step_name']} — "
+                f"safety protocol bypassed."
+            )
+            st.session_state.event_log.append({
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "type": "timeout",
+                "tool": expired_tool,
+                "detail": f"Time expired — auto-advanced (−{TIMER_PENALTY} pts)",
+            })
+            st.toast(
+                f"⏰ Time expired for {expired_step['step_name']}!",
+                icon="⏰",
+            )
+
+            st.session_state.current_step_index = current_idx + 1
+            st.session_state.step_start_time = time.time()
+            current_idx = st.session_state.current_step_index
+            if current_idx >= n_steps:
+                st.session_state.app_state = "COMPLETE"
+                log_proctor("correct", "All training steps completed.")
+            st.rerun()
+
+    # ── 2. Drain tool_queue from YOLO callback (camera mode) ──
+    if not is_demo:
+        while not tool_queue.empty():
+            try:
+                detected = tool_queue.get_nowait()
+            except queue.Empty:
+                break
+            prev_idx = current_idx
+            current_idx = process_detection(detected, steps, current_idx)
+            if current_idx > prev_idx:
+                # Flush remaining queue to prevent ghost detections skipping steps
+                while not tool_queue.empty():
+                    try:
+                        tool_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                break
+
+    # ── 2b. Drain Clarity feedback ──
+    proctor = get_live_proctor()
+    if proctor is not None:
+        new_fb = proctor.drain_all_feedback()
+        if new_fb:
+            st.session_state.clarity_feedback.extend(new_fb)
+
+    # Auto-refresh every 2s — drives timer countdown + YOLO queue drain
+    if st_autorefresh is not None and st.session_state.app_state == "TRAINING":
+        st_autorefresh(interval=2000, key="timer_poll")
+
+    # ── 3. Update shared target for the video callback thread ──
+    if current_idx < n_steps:
+        target_tool_key = steps[current_idx]["target_tool_key"]
     else:
-        st.success("Great work! No coaching notes so far.")
+        target_tool_key = ""
 
-    if st.button("End Lab Session", type="primary", width="stretch"):
-        set_mode("POST_OP")
-        st.session_state[KEY_NAV] = "Report"
-        log_event("STATE_CHANGE", {"from": "INTRA_OP", "to": "POST_OP"}, mode="POST_OP")
-        st.rerun()
+    syllabus_keys = {s["target_tool_key"] for s in steps}
+    wrong_pool = [k for k in STANDARD_TOOL_KEYS if k not in syllabus_keys]
+    all_tools = [s["target_tool_key"] for s in steps]
+    set_shared_target(target_tool_key, all_tools, wrong_pool)
 
-# =============================================================================
-# REPORT tab (was Post-Op)
-# =============================================================================
+    # ── 70 / 30 layout ──
+    module = st.session_state.module_name
+    col_video, col_syllabus = st.columns([7, 3])
 
-if nav == "Report":
-    st.subheader("Lab Session Report")
+    # ── LEFT COLUMN: Camera feed OR Demo Tray ──
+    with col_video:
+        if is_demo:
+            # ─────────────────────────────────────
+            # DEMO MODE — Virtual Instrument Tray
+            # ─────────────────────────────────────
+            st.markdown(f"### 🧪 Virtual Instrument Tray — {module}")
 
-    rubric = compute_rubric(
-        recipe,
-        best_streak=st.session_state.get(KEY_STREAK_BEST, 0),
-        hand_stability_samples=st.session_state.get(KEY_HAND_STABILITY, []),
-    )
-
-    # --- Radar chart (Plotly) ---
-    try:
-        import plotly.graph_objects as go
-
-        categories = ["Setup\nCompleteness", "Technique\nSafety", "Efficiency", "Streak\nBonus"]
-        values = [
-            rubric["setup_completeness"],
-            rubric["technique_safety"],
-            rubric["efficiency"],
-            rubric["streak_bonus"],
-        ]
-        fig = go.Figure(data=go.Scatterpolar(
-            r=values + [values[0]],
-            theta=categories + [categories[0]],
-            fill="toself",
-            fillcolor="rgba(0,229,255,0.15)",
-            line=dict(color="#00e5ff", width=2),
-            marker=dict(size=6),
-        ))
-        fig.update_layout(
-            polar=dict(
-                bgcolor="rgba(0,0,0,0)",
-                radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(size=10, color="#8899aa")),
-                angularaxis=dict(tickfont=dict(size=11, color="#e0e6ed")),
-            ),
-            showlegend=False,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(t=40, b=40, l=60, r=60),
-            height=380,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    except ImportError:
-        st.info("Install plotly (`pip install plotly`) for the radar chart visualization.")
-
-    # --- Metric cards ---
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.metric("Overall", f"{rubric['total_weighted']}%")
-    with c2:
-        st.metric("Setup", f"{rubric['setup_completeness']}%")
-    with c3:
-        st.metric("Safety", f"{rubric['technique_safety']}%")
-    with c4:
-        st.metric("Efficiency", f"{rubric['efficiency']}%")
-    with c5:
-        st.metric("Streak", f"{rubric['streak_bonus']}%")
-
-    details = rubric.get("details", {})
-    st.caption(
-        f"Alerts fired: {details.get('n_alerts', 0)} · "
-        f"Duration: {int(details.get('actual_seconds', 0))}s / "
-        f"{int(details.get('expected_seconds', 0))}s expected · "
-        f"Best streak: {int(details.get('best_streak_seconds', 0))}s"
-    )
-
-    # --- Export buttons ---
-    st.markdown("---")
-    st.markdown("### Export Your Results")
-    exp1, exp2 = st.columns(2)
-    with exp1:
-        st.download_button(
-            "Download Coach Report (JSON)",
-            data=rubric_to_json(rubric),
-            file_name="medlab_coach_report.json",
-            mime="application/json",
-        )
-    with exp2:
-        csv_data = events_to_csv()
-        st.download_button(
-            "Download CSV Transcript",
-            data=csv_data if csv_data else "No events recorded yet.",
-            file_name="medlab_session_transcript.csv",
-            mime="text/csv",
-        )
-
-    # --- Timeline ---
-    with st.expander("Full Event Timeline", expanded=False):
-        events = read_events()
-        if events:
-            for e in events[-50:]:
-                st.caption(
-                    f"{e.get('timestamp', '')} | {e.get('type', '')} | "
-                    f"mode={e.get('mode', '')} | phase={e.get('phase', '')}"
+            if current_idx < n_steps:
+                st.info(
+                    f"**Current objective:** {steps[current_idx]['instruction']}  \n"
+                    f"Pick the correct tool: **`{steps[current_idx]['target_tool_key']}`**"
                 )
-        else:
-            st.caption("No events logged yet.")
+            else:
+                st.success("All steps complete! Reset to try another procedure.")
 
-# =============================================================================
+            # Build tray: syllabus tools + distractors, shuffled
+            tray_tools = list(syllabus_keys)
+            distractors = [k for k in STANDARD_TOOL_KEYS if k not in syllabus_keys]
+            random.seed(42)
+            tray_tools += random.sample(distractors, min(5, len(distractors)))
+            tray_tools.sort()
+
+            training_active = st.session_state.app_state == "TRAINING"
+
+            n_cols = 4
+            for row_start in range(0, len(tray_tools), n_cols):
+                row_tools = tray_tools[row_start:row_start + n_cols]
+                cols_tray = st.columns(n_cols)
+                for col_idx, tool_key in enumerate(row_tools):
+                    with cols_tray[col_idx]:
+                        is_target = (current_idx < n_steps and tool_key == steps[current_idx]["target_tool_key"])
+                        already_done = tool_key in {steps[i]["target_tool_key"] for i in st.session_state.completed_steps}
+
+                        btn_type = "primary" if is_target else "secondary"
+                        icon = "✅" if already_done else "🔧"
+
+                        if st.button(
+                            f"{icon} {tool_key}",
+                            key=f"demo_{tool_key}",
+                            use_container_width=True,
+                            type=btn_type,
+                            disabled=not training_active,
+                        ):
+                            st.session_state.demo_injection = tool_key
+                            st.rerun()
+        else:
+            # ─────────────────────────────────────
+            # CAMERA MODE — WebRTC
+            # ─────────────────────────────────────
+            st.markdown(f"### 🎥 Live Feed — {module}")
+
+            if st.session_state.app_state == "TRAINING":
+                st.markdown('<div class="video-container">', unsafe_allow_html=True)
+
+                ctx = webrtc_streamer(
+                    key="surgipath-training-feed",
+                    mode=WebRtcMode.SENDRECV,
+                    video_frame_callback=video_frame_callback,
+                    media_stream_constraints={"video": True, "audio": False},
+                    async_processing=True,
+                )
+
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                st.info(
+                    "📷 Camera feed stopped — session complete. "
+                    "Click **Finalize & Grade** below for your performance analysis."
+                )
+
+        # ── Countdown Timer Bar ──
+        if (
+            current_idx < n_steps
+            and st.session_state.app_state == "TRAINING"
+            and st.session_state.step_start_time > 0
+        ):
+            _tl = steps[current_idx].get("time_limit_seconds", 60)
+            _elapsed = time.time() - st.session_state.step_start_time
+            _left = max(0.0, _tl - _elapsed)
+            _pct = max(0.0, min(1.0, _left / _tl)) * 100
+
+            if _left < 10:
+                _bar_color = "#FF3B30"
+                _timer_label = f"{int(_left)}s remaining"
+                _border = "border:1px solid rgba(255,59,48,0.3);"
+            elif _left < 20:
+                _bar_color = "#FF9500"
+                _timer_label = f"{int(_left)}s / {_tl}s"
+                _border = "border:1px solid rgba(255,149,0,0.2);"
+            else:
+                _bar_color = "#007AFF"
+                _timer_label = f"{int(_left)}s / {_tl}s"
+                _border = "border:1px solid #333;"
+
+            st.markdown(
+                f'<div style="background:#1E1E1E;border-radius:6px;padding:0.4rem 0.6rem;'
+                f'margin:0.5rem 0;{_border}">'
+                f'<div style="display:flex;justify-content:space-between;'
+                f'align-items:center;margin-bottom:4px;">'
+                f'<span style="color:{_bar_color};font-weight:500;'
+                f'font-size:0.8rem;">{_timer_label}</span>'
+                f'<span style="color:#666;font-size:0.7rem;font-weight:300;">'
+                f'{steps[current_idx]["step_name"]}</span></div>'
+                f'<div style="background:#121212;border-radius:3px;height:4px;">'
+                f'<div style="width:{_pct:.1f}%;height:100%;background:{_bar_color};'
+                f'border-radius:3px;transition:width 1s linear;"></div></div></div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Clarity rationale box (both modes) ──
+        rationale = st.session_state.latest_rationale
+        if rationale:
+            st.markdown(
+                f'<div class="tutor-box has-tip">'
+                f'<div class="tutor-label">Clarity — Rationale</div>'
+                f'<div class="tutor-text">{rationale}</div>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            if current_idx < n_steps:
+                action = "Click" if is_demo else "Present"
+                hint = (
+                    f"{action} <strong>{steps[current_idx]['target_tool_key']}</strong> "
+                    f"to proceed."
+                )
+            else:
+                hint = "All steps completed!"
+            st.markdown(
+                f'<div class="tutor-box">'
+                f'<div class="tutor-label">Clarity — Rationale</div>'
+                f'<div class="tutor-text">{hint}</div>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── RIGHT COLUMN: Syllabus Timeline ──
+    with col_syllabus:
+        st.markdown("### 📋 Syllabus Timeline")
+
+        _skipped_set = {s["step_idx"] for s in st.session_state.skipped_steps}
+        for i, step in enumerate(steps):
+            is_failed = i in _skipped_set
+            if i in st.session_state.completed_steps and is_failed:
+                css_cls = "step-completed"
+                icon = "✕"
+                task_html = f'<del style="color:#9E9E9E;">{step["step_name"]}</del>'
+                num_style = (
+                    'border-color:#FF3B30;color:#fff;background:#FF3B30;'
+                )
+            elif i in st.session_state.completed_steps:
+                css_cls = "step-completed"
+                icon = "✓"
+                task_html = step["step_name"]
+                num_style = ""
+            elif i == current_idx:
+                css_cls = "step-active"
+                icon = str(i + 1)
+                task_html = step["step_name"]
+                num_style = ""
+            else:
+                css_cls = "step-pending"
+                icon = str(i + 1)
+                task_html = step["step_name"]
+                num_style = ""
+
+            _step_time = step.get("time_limit_seconds", 60)
+            num_extra = f' style="{num_style}"' if num_style else ""
+            st.markdown(
+                f'<div class="syllabus-step {css_cls}">'
+                f'  <div class="step-header">'
+                f'    <div class="step-num"{num_extra}>{icon}</div>'
+                f'    <div class="step-task">{task_html}</div>'
+                f"  </div>"
+                f'  <div class="step-tool">{step["instruction"]}</div>'
+                f'  <div class="step-tool">Target: <code>{step["target_tool_key"]}</code>'
+                f' &middot; <span style="color:#9E9E9E;">{_step_time}s</span></div>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        if st.session_state.app_state == "COMPLETE":
+            st.markdown(
+                '<div class="completion-banner">'
+                "<h2>🏆 Module Complete!</h2>"
+                "<p>All instruments identified. Reset to try another procedure.</p>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Proctor Feedback panel ──
+    st.markdown("### Clarity — Clinical Evaluation")
+
+    if st.session_state.proctor_log:
+        feed_html = '<div class="proctor-panel">'
+        feed_html += '<div class="panel-title">Clarity Reasoning Log</div>'
+        for entry in st.session_state.proctor_log:
+            cls = "entry-correct" if entry["type"] == "correct" else "entry-correction"
+            if entry["type"] == "skip":
+                cls = "entry-correction"
+            feed_html += (
+                f'<div class="proctor-entry {cls}">'
+                f'<div class="entry-time">{entry["time"]}</div>'
+                f'{entry["text"]}'
+                f"</div>"
+            )
+        feed_html += "</div>"
+        st.markdown(feed_html, unsafe_allow_html=True)
+    else:
+        st.markdown(
+            '<div class="proctor-panel">'
+            '<div class="panel-title">Clarity Reasoning Log</div>'
+            '<div class="proctor-entry entry-thinking">'
+            '<div class="entry-time">--:--:--</div>'
+            "Awaiting first detection to begin evaluation…"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Manual Override / Skip Tool ──
+    if st.session_state.app_state == "TRAINING" and current_idx < n_steps:
+        st.markdown("---")
+        with st.expander("⚠️ Tool Unavailable / Manual Advance", expanded=False):
+            skip_reason = st.text_input(
+                "Reason for skipping",
+                placeholder="e.g. instrument not in kit, broken, unavailable…",
+                key="skip_reason_input",
+            )
+            if st.button(
+                f"⏭️ Skip {steps[current_idx]['target_tool_key']} (−{SKIP_PENALTY} pts)",
+                use_container_width=True,
+                type="secondary",
+                key="manual_advance_btn",
+            ):
+                st.session_state["_skip_requested"] = {"reason": skip_reason}
+                st.rerun()
+
+    # ── Post-Op Report (COMPLETE state) ──
+    if st.session_state.app_state == "COMPLETE":
+        _done_proctor = get_live_proctor()
+        if _done_proctor is not None and _done_proctor.active:
+            _done_proctor.stop()
+
+        st.markdown("---")
+        st.markdown("### Post-Op Session Report")
+
+        if not st.session_state.session_report:
+            with st.spinner("Clarity is generating your session report…"):
+                report = generate_session_report(
+                    procedure=st.session_state.module_name,
+                    total_steps=n_steps,
+                    verified_count=n_steps - len(st.session_state.skipped_steps),
+                    skipped_steps=st.session_state.skipped_steps,
+                    mastery_score=st.session_state.mastery_score,
+                )
+            st.session_state.session_report = report
+
+        score = st.session_state.mastery_score
+        skipped_count = len(st.session_state.skipped_steps)
+        verified_count = n_steps - skipped_count
+
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            if score > 80:
+                score_color = "#34C759"
+            elif score >= 50:
+                score_color = "#FF9500"
+            else:
+                score_color = "#FF3B30"
+            st.markdown(
+                f'<div style="text-align:center;padding:1rem;'
+                f'background:#1E1E1E;border:1px solid #333;border-radius:8px;">'
+                f'<div style="font-size:2rem;font-weight:600;'
+                f'color:{score_color};">{score}/100</div>'
+                f'<div style="color:#666;font-size:0.65rem;text-transform:uppercase;'
+                f'letter-spacing:0.8px;font-weight:400;">Mastery Score</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with rc2:
+            st.markdown(
+                f'<div style="text-align:center;padding:1rem;'
+                f'background:#1E1E1E;border:1px solid #333;border-radius:8px;">'
+                f'<div style="font-size:2rem;font-weight:600;'
+                f'color:#fff;">{verified_count}</div>'
+                f'<div style="color:#666;font-size:0.65rem;text-transform:uppercase;'
+                f'letter-spacing:0.8px;font-weight:400;">Vision Verified</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with rc3:
+            skip_color = "#FF3B30" if skipped_count > 0 else "#34C759"
+            st.markdown(
+                f'<div style="text-align:center;padding:1rem;'
+                f'background:#1E1E1E;border:1px solid #333;border-radius:8px;">'
+                f'<div style="font-size:2rem;font-weight:600;'
+                f'color:{skip_color};">{skipped_count}</div>'
+                f'<div style="color:#666;font-size:0.65rem;text-transform:uppercase;'
+                f'letter-spacing:0.8px;font-weight:400;">Manual Overrides</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("")
+        st.markdown(st.session_state.session_report)
+
+        # ── Learning Resources ──
+        st.markdown("---")
+        st.markdown("### Recommended Resources")
+
+        if not st.session_state.learning_resources:
+            with st.spinner("Clarity is curating learning resources…"):
+                resources = generate_learning_resources(
+                    procedure=st.session_state.module_name,
+                )
+            st.session_state.learning_resources = resources
+
+        st.markdown(
+            '<div style="background:#1E1E1E;border:1px solid #333;'
+            'border-left:3px solid #007AFF;'
+            'border-radius:8px;padding:1.2rem 1.5rem;margin-top:0.5rem;">'
+            '<div style="color:#007AFF;font-size:0.65rem;font-weight:500;'
+            'text-transform:uppercase;letter-spacing:0.8px;'
+            'margin-bottom:0.6rem;">Study Materials</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(st.session_state.learning_resources)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # ── Finalize & Grade — Clarity Performance Note ──
+        st.markdown("---")
+
+        if not st.session_state.final_critique:
+            n_obs = len(st.session_state.clarity_feedback)
+            if n_obs > 0:
+                st.caption(
+                    f"Clarity recorded **{n_obs}** live observations "
+                    f"during this session."
+                )
+            else:
+                st.caption(
+                    "No live observations recorded. Clarity will analyze "
+                    "the event log."
+                )
+
+            if st.button(
+                "Finalize & Grade",
+                use_container_width=True,
+                type="primary",
+            ):
+                with st.status(
+                    "Clarity is analyzing your session…", expanded=True
+                ) as status:
+                    st.write(
+                        f"Processing **{n_obs}** observations…"
+                    )
+                    st.write(
+                        "Generating Surgical Performance Note…"
+                    )
+                    critique = generate_final_critique(
+                        procedure=st.session_state.module_name,
+                        clarity_feedback=st.session_state.clarity_feedback,
+                        event_log=st.session_state.event_log,
+                        mastery_score=st.session_state.mastery_score,
+                    )
+                    status.update(
+                        label="Analysis complete!", state="complete"
+                    )
+                st.session_state.final_critique = critique
+                st.rerun()
+
+        if st.session_state.final_critique:
+            st.markdown(
+                '<div style="background:#1E1E1E;border:1px solid #333;'
+                'border-left:3px solid #007AFF;'
+                'border-radius:8px;padding:1.5rem 2rem;margin-top:0.5rem;">'
+                '<h3 style="color:#fff;margin:0 0 0.3rem;font-weight:500;">'
+                'Clarity — Performance Note</h3>'
+                '<hr style="border-color:#333;margin:0.3rem 0 1rem;">',
+                unsafe_allow_html=True,
+            )
+            st.markdown(st.session_state.final_critique)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────────
 # Footer
-# =============================================================================
+# ──────────────────────────────────────────────
 
 st.markdown("---")
-st.caption(f"MedLab Coach AI • {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+ft1, ft2, ft3 = st.columns(3)
+with ft1:
+    st.caption("SurgiPath v1.0")
+with ft2:
+    st.caption("Clarity AI · Gemini Live · YOLOv11")
+with ft3:
+    st.caption(f"Session: {datetime.now().strftime('%Y-%m-%d %H:%M')}")

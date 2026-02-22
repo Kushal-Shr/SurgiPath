@@ -1,4 +1,4 @@
-# Panacea: Surgical Mastery
+# SurgiPath
 
 AI-guided surgical training simulator that generates structured syllabi and walks trainees through instrument identification using real-time video.
 
@@ -28,7 +28,7 @@ AI-guided surgical training simulator that generates structured syllabi and walk
 ## Project Structure
 
 ```
-panacea/
+surgipath/
 ├── app.py                  # Main Streamlit application
 ├── requirements.txt        # Python dependencies
 ├── .gitignore
@@ -51,7 +51,7 @@ panacea/
 
 ```bash
 git clone https://github.com/anle0429/Panacea.git
-cd Panacea
+cd SurgiPath
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 # source .venv/bin/activate   # macOS/Linux
@@ -153,6 +153,6 @@ Swap the mock detection block for real inference, match `model.names[cls]` again
 
 ## Team
 
-Built for the hackathon by the Panacea team.
+Built for HackSLU 2026 by Kushal and An.
 
 ---

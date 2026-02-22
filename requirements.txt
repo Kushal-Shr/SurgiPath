@@ -1,12 +1,10 @@
-# MedLab Coach AI - Skill Assessment for Medical Training Labs
+# SurgiPath — AI-Guided Training Simulator
 streamlit
-streamlit-autorefresh
 streamlit-webrtc
-opencv-python
+streamlit-autorefresh
+opencv-python-headless
 av
+ultralytics
 google-genai
 pydantic
 python-dotenv
-mediapipe
-ultralytics
-plotly

@@ -1,4 +1,4 @@
-"""Styles package for Project Panacea surgical dashboard."""
+"""Styles package for SurgiPath surgical dashboard."""
 
 from pathlib import Path
 

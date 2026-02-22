@@ -1,17 +1,20 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Crimson+Pro:ital,wght@0,400;0,500;1,400&display=swap');
 
 :root {
-    --bg-primary: #0a0e17;
-    --bg-secondary: #111827;
-    --bg-card: #1a2332;
-    --cyan-accent: #00e5ff;
-    --cyan-dim: #0097a7;
-    --cyan-glow: rgba(0,229,255,0.15);
-    --text-primary: #e0e6ed;
-    --text-secondary: #8899aa;
-    --success: #00e676;
-    --warning: #ffab00;
-    --danger: #ff1744;
+    --bg-primary: #121212;
+    --bg-surface: #1E1E1E;
+    --bg-elevated: #252525;
+    --border: #333333;
+    --border-subtle: #2A2A2A;
+    --accent: #007AFF;
+    --accent-dim: #0055CC;
+    --accent-bg: rgba(0,122,255,0.08);
+    --text-primary: #FFFFFF;
+    --text-secondary: #9E9E9E;
+    --text-tertiary: #666666;
+    --success: #34C759;
+    --warning: #FF9500;
+    --danger: #FF3B30;
 }
 
 /* ── Global ── */
@@ -19,18 +22,22 @@
 html, body, [data-testid="stAppViewContainer"] {
     background-color: var(--bg-primary) !important;
     color: var(--text-primary) !important;
-    font-family: 'Inter', sans-serif !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
 
 [data-testid="stHeader"] {
     background-color: transparent !important;
 }
 
+[data-testid="stBottomBlockContainer"] {
+    background-color: var(--bg-primary) !important;
+}
+
 /* ── Sidebar ── */
 
 [data-testid="stSidebar"] {
-    background-color: var(--bg-secondary) !important;
-    border-right: 1px solid var(--cyan-dim) !important;
+    background-color: var(--bg-surface) !important;
+    border-right: 1px solid var(--border) !important;
 }
 
 [data-testid="stSidebar"] h1,
@@ -44,34 +51,53 @@ html, body, [data-testid="stAppViewContainer"] {
     color: var(--text-primary) !important;
 }
 
-/* ── Headings ── */
+/* ── Typography ── */
 
-h1, h2, h3, h4 {
-    color: var(--cyan-accent) !important;
+h1 {
+    color: var(--text-primary) !important;
     font-weight: 600 !important;
+    letter-spacing: 0.5px !important;
+}
+
+h2, h3, h4 {
+    color: var(--text-primary) !important;
+    font-weight: 500 !important;
+}
+
+p, span, li {
+    font-weight: 300;
 }
 
 /* ── Dashboard header card ── */
 
 .dashboard-header {
-    background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-secondary) 100%);
-    border: 1px solid var(--cyan-dim);
-    border-radius: 12px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
     padding: 1.2rem 2rem;
     margin-bottom: 1rem;
-    box-shadow: 0 0 20px var(--cyan-glow);
 }
 
 .dashboard-header h1 {
     margin: 0;
-    font-size: 1.8rem;
-    letter-spacing: 2px;
+    font-size: 1.6rem;
+    font-weight: 600 !important;
+    letter-spacing: 1.5px;
+    color: var(--text-primary) !important;
+}
+
+.dashboard-header h2 {
+    margin: 0;
+    font-size: 1.3rem;
+    font-weight: 500 !important;
+    color: var(--text-primary) !important;
 }
 
 .dashboard-header p {
     color: var(--text-secondary) !important;
-    margin: 0.2rem 0 0 0;
-    font-size: 0.9rem;
+    margin: 0.3rem 0 0 0;
+    font-size: 0.85rem;
+    font-weight: 300;
 }
 
 /* ── Status badge ── */
@@ -80,119 +106,114 @@ h1, h2, h3, h4 {
     display: inline-block;
     padding: 0.25rem 0.75rem;
     border-radius: 20px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 1px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.8px;
     text-transform: uppercase;
 }
 
 .status-active {
-    background: rgba(0,230,118,0.15);
+    background: rgba(52,199,89,0.1);
     color: var(--success) !important;
-    border: 1px solid var(--success);
+    border: 1px solid rgba(52,199,89,0.3);
 }
 
 .status-idle {
-    background: rgba(136,153,170,0.15);
+    background: rgba(158,158,158,0.08);
     color: var(--text-secondary) !important;
-    border: 1px solid var(--text-secondary);
+    border: 1px solid var(--border);
 }
 
 .status-ready {
-    background: rgba(255,171,0,0.15);
-    color: var(--warning) !important;
-    border: 1px solid var(--warning);
+    background: rgba(0,122,255,0.08);
+    color: var(--accent) !important;
+    border: 1px solid rgba(0,122,255,0.3);
 }
 
 /* ── Video container ── */
 
 .video-container {
-    border: 2px solid var(--cyan-dim);
-    border-radius: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
     overflow: hidden;
-    box-shadow: 0 0 30px var(--cyan-glow);
 }
 
 /* ── Syllabus step cards ── */
 
 .syllabus-step {
-    background: var(--bg-card);
-    border: 1px solid transparent;
-    border-radius: 12px;
-    padding: 1rem 1.2rem;
-    margin-bottom: 0.8rem;
-    transition: all 0.3s ease;
-    position: relative;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.6rem;
+    transition: border-color 0.2s ease;
 }
 
 .syllabus-step .step-header {
     display: flex;
     align-items: center;
     gap: 0.7rem;
-    margin-bottom: 0.4rem;
+    margin-bottom: 0.3rem;
 }
 
 .syllabus-step .step-num {
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: 700;
-    font-size: 0.85rem;
+    font-weight: 600;
+    font-size: 0.8rem;
     flex-shrink: 0;
-    border: 2px solid var(--text-secondary);
-    color: var(--text-secondary);
+    border: 1.5px solid var(--text-tertiary);
+    color: var(--text-tertiary);
     background: transparent;
 }
 
 .syllabus-step .step-task {
-    font-size: 0.95rem;
+    font-size: 0.88rem;
     font-weight: 500;
     color: var(--text-primary);
 }
 
 .syllabus-step .step-tool {
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     color: var(--text-secondary);
-    margin-left: 2.6rem;
-    margin-top: 0.2rem;
+    margin-left: 2.4rem;
+    margin-top: 0.15rem;
+    font-weight: 300;
 }
 
-.syllabus-step .step-tool span {
-    color: var(--cyan-accent) !important;
-    font-weight: 600;
+.syllabus-step .step-tool code {
+    color: var(--accent) !important;
+    font-weight: 500;
+    background: rgba(0,122,255,0.08) !important;
+    padding: 1px 5px;
+    border-radius: 3px;
 }
 
 /* Active step */
 .syllabus-step.step-active {
-    border-color: var(--cyan-accent);
-    box-shadow: 0 0 20px var(--cyan-glow);
-    background: linear-gradient(135deg, var(--bg-card) 0%, rgba(0,151,167,0.08) 100%);
+    border-color: var(--accent);
+    background: linear-gradient(135deg, var(--bg-surface) 0%, rgba(0,122,255,0.04) 100%);
 }
 
 .syllabus-step.step-active .step-num {
-    border-color: var(--cyan-accent);
-    color: var(--bg-primary);
-    background: var(--cyan-accent);
-    animation: pulse-ring 2s ease-in-out infinite;
-}
-
-@keyframes pulse-ring {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(0,229,255,0.4); }
-    50% { box-shadow: 0 0 0 8px rgba(0,229,255,0); }
+    border-color: var(--accent);
+    color: #fff;
+    background: var(--accent);
 }
 
 /* Completed step */
 .syllabus-step.step-completed {
-    border-color: var(--success);
-    background: rgba(0,230,118,0.04);
+    border-color: rgba(52,199,89,0.3);
+    background: rgba(52,199,89,0.03);
 }
 
 .syllabus-step.step-completed .step-num {
     border-color: var(--success);
-    color: var(--bg-primary);
+    color: #fff;
     background: var(--success);
 }
 
@@ -202,82 +223,84 @@ h1, h2, h3, h4 {
 
 /* Pending step */
 .syllabus-step.step-pending {
-    opacity: 0.5;
+    opacity: 0.45;
 }
 
-/* ── Tutor message box ── */
+/* ── Tutor / Rationale box ── */
 
 .tutor-box {
-    background: var(--bg-card);
-    border: 1px solid var(--cyan-dim);
-    border-radius: 12px;
-    padding: 1.2rem 1.5rem;
-    margin-top: 1rem;
-    position: relative;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.3rem;
+    margin-top: 0.8rem;
 }
 
 .tutor-box .tutor-label {
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 1.5px;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 1.2px;
     text-transform: uppercase;
-    color: var(--cyan-dim);
-    margin-bottom: 0.5rem;
+    color: var(--text-tertiary);
+    margin-bottom: 0.4rem;
 }
 
 .tutor-box .tutor-text {
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     line-height: 1.6;
     color: var(--text-primary);
+    font-weight: 300;
 }
 
 .tutor-box.has-tip {
-    border-color: var(--success);
-    box-shadow: 0 0 20px rgba(0,230,118,0.08);
+    border-left: 3px solid var(--success);
 }
 
 .tutor-box.has-tip .tutor-label {
     color: var(--success);
 }
 
-/* ── Proctor feedback panel ── */
+/* ── Proctor feedback panel — Consultation Note style ── */
 
 .proctor-panel {
-    background: var(--bg-card);
-    border: 1px solid var(--cyan-dim);
-    border-radius: 12px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
     padding: 1.2rem;
-    margin-top: 1.5rem;
+    margin-top: 1.2rem;
     max-height: 320px;
     overflow-y: auto;
 }
 
 .proctor-panel .panel-title {
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 1.5px;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 1.2px;
     text-transform: uppercase;
-    color: var(--cyan-dim);
+    color: var(--text-tertiary);
     margin-bottom: 0.8rem;
 }
 
 .proctor-entry {
-    border-radius: 0 8px 8px 0;
-    padding: 0.8rem 1rem;
-    margin-bottom: 0.6rem;
-    font-size: 0.85rem;
-    line-height: 1.5;
+    border-radius: 0 6px 6px 0;
+    padding: 0.7rem 0.9rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    font-family: 'Crimson Pro', Georgia, serif;
+    font-weight: 400;
 }
 
 .proctor-entry .entry-time {
-    font-size: 0.7rem;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.65rem;
     font-weight: 500;
-    margin-bottom: 0.3rem;
+    margin-bottom: 0.25rem;
+    letter-spacing: 0.5px;
 }
 
-/* Correct tool — rationale */
 .proctor-entry.entry-correct {
-    background: rgba(0,230,118,0.06);
+    background: rgba(52,199,89,0.04);
     border-left: 3px solid var(--success);
 }
 
@@ -285,9 +308,8 @@ h1, h2, h3, h4 {
     color: var(--success);
 }
 
-/* Wrong tool — course correction */
 .proctor-entry.entry-correction {
-    background: rgba(255,23,68,0.06);
+    background: rgba(255,59,48,0.04);
     border-left: 3px solid var(--danger);
 }
 
@@ -295,109 +317,179 @@ h1, h2, h3, h4 {
     color: var(--danger);
 }
 
-/* Thinking indicator */
 .proctor-entry.entry-thinking {
-    background: rgba(0,229,255,0.06);
-    border-left: 3px solid var(--cyan-accent);
+    background: rgba(0,122,255,0.04);
+    border-left: 3px solid var(--accent);
 }
 
 .proctor-entry.entry-thinking .entry-time {
-    color: var(--cyan-accent);
+    color: var(--accent);
 }
 
 /* ── Completion banner ── */
 
 .completion-banner {
-    background: linear-gradient(135deg, rgba(0,230,118,0.12) 0%, rgba(0,151,167,0.12) 100%);
-    border: 1px solid var(--success);
-    border-radius: 16px;
-    padding: 2rem;
+    background: var(--bg-surface);
+    border: 1px solid rgba(52,199,89,0.3);
+    border-radius: 8px;
+    padding: 1.8rem;
     text-align: center;
     margin: 1rem 0;
-    box-shadow: 0 0 30px rgba(0,230,118,0.1);
 }
 
 .completion-banner h2 {
     color: var(--success) !important;
     margin-bottom: 0.3rem;
+    font-weight: 600 !important;
 }
 
 .completion-banner p {
     color: var(--text-secondary);
-    font-size: 0.9rem;
+    font-size: 0.85rem;
+    font-weight: 300;
 }
 
 /* ── Metric cards ── */
 
 .metric-card {
-    background: var(--bg-card);
-    border: 1px solid var(--cyan-dim);
-    border-radius: 10px;
-    padding: 1rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem;
     text-align: center;
 }
 
 .metric-card .value {
-    font-size: 1.8rem;
-    font-weight: 700;
-    color: var(--cyan-accent);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--text-primary);
 }
 
 .metric-card .label {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
+    font-size: 0.65rem;
+    color: var(--text-tertiary);
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 0.8px;
+    font-weight: 400;
 }
 
 /* ── Progress ring ── */
 
 .progress-ring {
-    background: var(--bg-card);
-    border: 1px solid var(--cyan-dim);
-    border-radius: 12px;
-    padding: 1.2rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
     text-align: center;
-    margin-bottom: 1rem;
+    margin-bottom: 0.8rem;
 }
 
 .progress-ring .pct {
-    font-size: 2.4rem;
-    font-weight: 700;
-    color: var(--cyan-accent);
+    font-size: 2rem;
+    font-weight: 600;
+    color: var(--accent);
 }
 
 .progress-ring .pct-label {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
+    font-size: 0.65rem;
+    color: var(--text-tertiary);
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 0.8px;
+    font-weight: 400;
 }
 
-/* ── Streamlit overrides ── */
+/* ── Streamlit widget overrides ── */
 
 .stTextInput > div > div > input {
-    background-color: var(--bg-secondary) !important;
+    background-color: var(--bg-elevated) !important;
     color: var(--text-primary) !important;
-    border: 1px solid var(--cyan-dim) !important;
-    border-radius: 8px !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    font-weight: 300 !important;
+}
+
+.stTextInput > div > div > input:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 1px var(--accent) !important;
 }
 
 .stSelectbox > div > div {
-    background-color: var(--bg-secondary) !important;
+    background-color: var(--bg-elevated) !important;
     color: var(--text-primary) !important;
-    border: 1px solid var(--cyan-dim) !important;
-    border-radius: 8px !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
 }
 
 div[data-testid="stStatusWidget"] {
-    background-color: var(--bg-card) !important;
+    background-color: var(--bg-surface) !important;
 }
 
+/* Primary buttons — Surgical Blue */
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="stBaseButton-primary"] {
+    background-color: var(--accent) !important;
+    border: 1px solid var(--accent) !important;
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.5px !important;
+    transition: opacity 0.2s ease !important;
+}
+
+.stButton > button[kind="primary"]:hover,
+.stButton > button[data-testid="stBaseButton-primary"]:hover {
+    opacity: 0.85 !important;
+}
+
+/* Secondary / default buttons */
 .stButton > button {
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.3px !important;
+    transition: opacity 0.2s ease !important;
+}
+
+/* Ghost button — Skip / Manual Advance */
+button[data-testid="stBaseButton-secondary"] {
+    background: transparent !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-secondary) !important;
+    border-radius: 6px !important;
+}
+
+button[data-testid="stBaseButton-secondary"]:hover {
+    border-color: var(--text-primary) !important;
+    color: var(--text-primary) !important;
+}
+
+/* ── Scrollbar ── */
+
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-tertiary);
+}
+
+/* ── Expander ── */
+
+[data-testid="stExpander"] {
+    border: 1px solid var(--border) !important;
     border-radius: 8px !important;
-    font-weight: 600 !important;
-    letter-spacing: 1px !important;
-    text-transform: uppercase !important;
-    transition: all 0.3s ease !important;
+    background: var(--bg-surface) !important;
+}
+
+/* ── Horizontal rule ── */
+
+hr {
+    border-color: var(--border-subtle) !important;
 }

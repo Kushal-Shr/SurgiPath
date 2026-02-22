@@ -19,6 +19,9 @@ build/
 *.swp
 *.swo
 
+# Session recordings
+temp/
+
 # OS
 .DS_Store
 Thumbs.db
