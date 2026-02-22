@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /c/Users/thien/Panacea && python -c \"\nfrom src.hands import get_technique_feedback\n# Test all phases and grip combos\ntests = [\n    \\('pencil_grip', 'incision', 'steady', 35\\),\n    \\('palmar_grip', 'incision', 'steady', 72\\),\n    \\('open_hand', 'suturing', 'tremor', 10\\),\n    \\('precision_grip', 'suturing', 'moderate', 40\\),\n]\nfor args in tests:\n    r = get_technique_feedback\\(*args\\)\n    print\\(f'{args[0]:18} | {args[1]:10} | {r[\\\\\"status\\\\\"]:8} | {r[\\\\\"message\\\\\"]:25} | {r[\\\\\"tip\\\\\"][:55]}'\\)\n\" 2>&1)",
+      "Bash(cd /c/Users/thien/Panacea && python -c \"import py_compile; py_compile.compile\\('app.py', doraise=True\\); print\\('app.py syntax OK'\\)\" 2>&1)",
+      "Bash(cd /c/Users/thien/Panacea && python -c \"\nwith open\\('app.py', 'r', encoding='utf-8'\\) as f:\n    lines = f.readlines\\(\\)\n# Show lines 758-767 with repr to expose tabs vs spaces\nfor i, line in enumerate\\(lines[757:768], start=758\\):\n    print\\(f'{i}: {repr\\(line\\)}'\\)\" 2>&1)",
+      "Bash(head:*)",
+      "Bash(cd /c/Users/thien/Panacea && python -c \"import py_compile; py_compile.compile\\('app.py', doraise=True\\) or print\\('OK'\\)\" 2>&1)",
+      "Bash(cd /c/Users/thien/Panacea && python -c \"import py_compile; py_compile.compile\\('src/hands.py', doraise=True\\) or print\\('OK'\\)\" 2>&1)"
+    ]
+  }
+}

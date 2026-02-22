@@ -1,14 +1,16 @@
 """
 Rubric scoring engine for MedLab Coach AI.
 
-Reads the JSONL event log and computes four pedagogical rubric dimensions:
-  1. Setup Completeness  — Did the student find all required tools?
-  2. Technique Safety     — How few coaching alerts fired? Includes hand-stability if available.
-  3. Efficiency           — Actual time vs expected time for the lab session.
-  4. Streak Bonus         — Longest error-free streak (gamification reward).
+Dimensions (0-100 each):
+  1. Setup Completeness  — all required tools found?
+  2. Technique Safety     — fewer coaching alerts = higher; overrides reduce penalty
+  3. Efficiency           — actual vs expected time
+  4. Streak Bonus         — longest error-free streak
 
-Each dimension is scored 0-100. A weighted total is also returned.
+Override-aware: if a student denied a low/medium-confidence prompt, that alert
+does NOT count as a violation (or counts at reduced weight).
 """
+
 import json
 import csv
 import io
@@ -18,23 +20,64 @@ from typing import Any
 from src.logger import read_events
 
 
+def _count_alerts_with_overrides(events: list[dict]) -> dict[str, Any]:
+    """Count effective alerts, accounting for USER_OVERRIDE deny events."""
+    prompts: dict[str, dict] = {}
+    overrides: dict[str, dict] = {}
+
+    for e in events:
+        etype = e.get("type", "")
+        if etype == "COACH_PROMPT":
+            pid = e.get("prompt_id", "")
+            if pid:
+                prompts[pid] = e
+        elif etype == "USER_OVERRIDE":
+            pid = e.get("prompt_id", "")
+            if pid:
+                overrides[pid] = e
+
+    # Also count legacy ALERT events (no prompt_id)
+    legacy_alerts = [e for e in events if e.get("type") == "ALERT"]
+
+    total = len(prompts) + len(legacy_alerts)
+    confirmed = 0
+    denied = 0
+    effective = len(legacy_alerts)  # legacy alerts always count
+
+    for pid, prompt in prompts.items():
+        override = overrides.get(pid)
+        tier = prompt.get("risk_tier", "high")
+        if override and override.get("decision") == "deny":
+            denied += 1
+            if tier == "high":
+                effective += 0.5  # high-confidence deny still counts half
+            # low/medium deny → 0 penalty
+        else:
+            if override and override.get("decision") == "confirm":
+                confirmed += 1
+            effective += 1  # unresolved or confirmed = full penalty
+
+    tiers = {"high": 0, "medium": 0, "low": 0}
+    for p in prompts.values():
+        t = p.get("risk_tier", "high")
+        tiers[t] = tiers.get(t, 0) + 1
+
+    return {
+        "total": total,
+        "effective": effective,
+        "confirmed": confirmed,
+        "denied": denied,
+        "tiers": tiers,
+        "override_rate": denied / max(1, total),
+    }
+
+
 def compute_rubric(
     recipe: dict,
     best_streak: float = 0,
     hand_stability_samples: list[float] | None = None,
+    technique_summary: dict | None = None,
 ) -> dict[str, Any]:
-    """
-    Compute the full rubric dict from event log + recipe.
-
-    Returns: {
-      "setup_completeness": 0-100,
-      "technique_safety": 0-100,
-      "efficiency": 0-100,
-      "streak_bonus": 0-100,
-      "total_weighted": 0-100,
-      "details": {...},
-    }
-    """
     events = read_events()
 
     # --- 1. Setup Completeness ---
@@ -47,13 +90,13 @@ def compute_rubric(
     else:
         setup_score = 0
 
-    # --- 2. Technique Safety ---
-    alerts_ev = [e for e in events if e.get("type") == "ALERT"]
-    n_alerts = len(alerts_ev)
-    if n_alerts == 0:
+    # --- 2. Technique Safety (override-aware) ---
+    alert_info = _count_alerts_with_overrides(events)
+    n_effective = alert_info["effective"]
+    if n_effective == 0:
         alert_penalty = 0
     else:
-        alert_penalty = min(100, n_alerts * 12)
+        alert_penalty = min(100, int(n_effective * 12))
     safety_from_alerts = max(0, 100 - alert_penalty)
 
     hand_score = 100
@@ -61,7 +104,16 @@ def compute_rubric(
         avg_jitter = sum(hand_stability_samples) / len(hand_stability_samples)
         hand_score = max(0, int(100 - avg_jitter * 500))
 
-    technique_safety = int(0.6 * safety_from_alerts + 0.4 * hand_score)
+    # Grip quality bonus/penalty from technique summary
+    grip_score = 100
+    if technique_summary and technique_summary.get("grips"):
+        grips = technique_summary["grips"]
+        good_grips = sum(1 for g in grips if g.get("grip_type") in ("pencil_grip", "precision_grip"))
+        total_grips = len(grips)
+        if total_grips > 0:
+            grip_score = int(100 * good_grips / total_grips)
+
+    technique_safety = int(0.5 * safety_from_alerts + 0.3 * hand_score + 0.2 * grip_score)
 
     # --- 3. Efficiency ---
     expected = float(recipe.get("expected_time_seconds", 300))
@@ -105,22 +157,27 @@ def compute_rubric(
         "streak_bonus": streak_bonus,
         "total_weighted": total,
         "details": {
-            "n_alerts": n_alerts,
+            "n_alerts": alert_info["total"],
+            "n_effective_alerts": alert_info["effective"],
+            "confirmed": alert_info["confirmed"],
+            "denied": alert_info["denied"],
+            "override_rate": round(alert_info["override_rate"], 3),
+            "tiers": alert_info["tiers"],
             "actual_seconds": actual,
             "expected_seconds": expected,
             "best_streak_seconds": best_streak,
             "hand_samples": len(hand_stability_samples or []),
+            "grip_score": grip_score,
+            "smoothness": technique_summary.get("smoothness", "unknown") if technique_summary else "unknown",
         },
     }
 
 
 def rubric_to_json(rubric: dict) -> str:
-    """Serialize rubric dict to pretty JSON for download."""
     return json.dumps(rubric, indent=2, ensure_ascii=False)
 
 
 def events_to_csv() -> str:
-    """Convert events.jsonl to a CSV string for download."""
     events = read_events()
     if not events:
         return ""

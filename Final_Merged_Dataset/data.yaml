@@ -1,0 +1,6 @@
+path: C:\Users\thien\Panacea\Final_Merged_Dataset
+train: images/train
+val: images/val
+
+nc: 8
+names: ['scalpel', 'forceps', 'needle_holder', 'scissors', 'clamp', 'suction', 'gauze', 'syringe']

@@ -1,6 +1,16 @@
 {
   "name": "Trauma Room",
   "expected_time_seconds": 300,
+  "aliases": {
+    "needle_holders": "needle_holder",
+    "needle_driver": "needle_holder",
+    "biclamp": "clamp",
+    "suction_cannula": "suction",
+    "suction_tube": "suction",
+    "bipolar_forceps": "forceps",
+    "tweezers": "forceps",
+    "suture,_suture_needle": "suture_needle"
+  },
   "preop_required": [
     { "tool": "scalpel", "min_count": 1 },
     { "tool": "forceps", "min_count": 1 },
@@ -55,6 +65,28 @@
       "if_missing": [],
       "hold_seconds": 2.0,
       "message": "Needle holder and scissors for closing."
+    },
+    {
+      "id": "r6",
+      "phase": "suturing",
+      "if_holding": ["needle_holder"],
+      "if_not_holding": ["scalpel"],
+      "hold_seconds": 2.0,
+      "message": "Good — using needle holder for suturing, scalpel is put away."
+    },
+    {
+      "id": "r7",
+      "phase": "incision",
+      "if_holding": ["scalpel"],
+      "hold_seconds": 1.5,
+      "message": "Scalpel in hand — incision technique in progress."
+    },
+    {
+      "id": "r8",
+      "phase": "suturing",
+      "if_holding": ["scalpel"],
+      "hold_seconds": 2.0,
+      "message": "Scalpel appears to be in hand during suturing — consider putting it down."
     }
   ]
 }

@@ -117,7 +117,7 @@ def draw_detections(
     Returns the annotated frame (BGR).
     """
     out = frame_bgr.copy()
-    color_bgr = (0, 229, 255)  # cyan
+    color_bgr = (196, 115, 26)  # medical blue (BGR)
     for d in detections:
         xyxy = d.get("xyxy", [])
         if len(xyxy) != 4:
@@ -131,6 +131,6 @@ def draw_detections(
         cv2.rectangle(out, (x1, y1 - th - 8), (x1 + tw + 4, y1), color_bgr, -1)
         cv2.putText(
             out, label, (x1 + 2, y1 - 4),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1
         )
     return out

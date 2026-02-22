@@ -5,7 +5,12 @@ streamlit-webrtc
 opencv-python
 av
 google-generativeai
+google-genai
+python-dotenv
 pydantic
 mediapipe
 ultralytics
 plotly
+edge-tts
+gTTS
+pyttsx3
