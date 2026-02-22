@@ -19,7 +19,7 @@ AI-guided surgical training simulator that generates structured syllabi and walk
 | ----------------------- | ------------------------------------------ |
 | Frontend                | Streamlit (wide layout, custom dark CSS)   |
 | Video                   | streamlit-webrtc, OpenCV, PyAV             |
-| AI Syllabus             | Gemini 1.5 Flash (with hardcoded fallback) |
+| AI Syllabus             | Gemini 1.5 Flash                           |
 | Validation              | Pydantic v2                                |
 | Detection (placeholder) | YOLOv11 + MediaPipe (TODO)                 |
 
